@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' https://i.ytimg.com data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>own-tube</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#grid">К результатам</a>
+<div class="app">
+  <aside class="stage" aria-hidden="true">
+    <div class="globe"></div>
+    <img class="hero" src="assets/heroine.webp" alt="">
+    <div class="caption"><b>own-tube</b><span>свой клиент YouTube</span></div>
+  </aside>
+
+  <main class="main">
+    <header class="bar">
+      <form id="searchForm" class="search" role="search">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <label class="sr" for="q">Поиск</label>
+        <input id="q" type="search" placeholder="Что посмотрим?" autocomplete="off" maxlength="200" autofocus>
+        <button class="go" type="submit">Найти</button>
+      </form>
+      <div class="seg" role="radiogroup" aria-label="Качество">
+        <button type="button" role="radio" data-q="best" aria-checked="true">Лучшее</button>
+        <button type="button" role="radio" data-q="1080" aria-checked="false">1080p</button>
+        <button type="button" role="radio" data-q="720" aria-checked="false">720p</button>
+      </div>
+      <button id="openSettings" class="icon-btn" type="button" aria-label="Настройки" title="Настройки">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </header>
+
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+    <section id="grid" class="grid" aria-label="Результаты поиска"></section>
+    <p id="empty" class="empty">Введите запрос, и здесь появятся видео.</p>
+  </main>
+</div>
+
+<dialog id="settings" aria-labelledby="settingsTitle">
+  <form id="settingsForm" method="dialog">
+    <h2 id="settingsTitle">Настройки</h2>
+    <label for="proxy">Прокси (необязательно)</label>
+    <input id="proxy" type="text" placeholder="socks5://127.0.0.1:1080" autocomplete="off" spellcheck="false">
+    <p class="hint">Адрес без логина и пароля. Для поиска подойдёт HTTP и SOCKS, для воспроизведения в mpv пока только HTTP.</p>
+    <label for="mpv">Путь к mpv (необязательно)</label>
+    <input id="mpv" type="text" placeholder="по умолчанию: папка mpv рядом с программой или PATH" autocomplete="off" spellcheck="false">
+    <p id="settingsError" class="err" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="cancelSettings" class="ghost">Отмена</button>
+      <button type="submit" class="go">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+<script src="app.js"></script>
+</body>
+</html>
