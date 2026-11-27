@@ -39,11 +39,11 @@ def main() -> None:
 
         pg = page_for(1440, 900)
         pg.screenshot(path=str(OUT / "mockup_home_chat_1440x900.png"))
-        pg.click(".switcher button[data-id=gb]")      # другая помощница: меняется картинка и цвет
+        pg.click(".switcher button[data-id=kate]")      # другая помощница: меняется картинка и цвет
         pg.click(".acts button:nth-child(3)")          # «Радуется»
         pg.wait_for_timeout(450)
         pg.screenshot(path=str(OUT / "mockup_home_kate_joy_1440x900.png"))
-        pg.click(".switcher button[data-id=default]")
+        pg.click(".switcher button[data-id=rei]")
         pg.click(".account")                            # вошёл в Google
         pg.click("#side .nav >> text=Настройки")
         pg.wait_for_timeout(500)

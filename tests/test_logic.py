@@ -10,7 +10,7 @@ STREAM_V = "https://rr1.googlevideo.com/videoplayback?v=1"
 STREAM_A = "https://rr2.googlevideo.com/videoplayback?a=1"
 
 
-def test_normalize_drops_bad_entries_and_builds_thumb_itself():
+def test_normalize_drops_bad_entries_and_builds_thumb_itself():  # noqa: D103
     items = search.normalize([
         {"id": "dQw4w9WgXcQ", "title": "T", "channel": "C", "duration": 3725, "view_count": 1500000,
          "thumbnails": [{"url": "https://evil.example/x.jpg"}]},
@@ -41,9 +41,10 @@ def test_pick_streams_rejects_foreign_hosts():
         player.pick_streams({"vcodec": "avc1", "acodec": "aac", "url": "https://evil.example/v"})
 
 
-def test_socks_proxy_refused_for_mpv():
-    with pytest.raises(player.PlayerError):
-        player.build_command("mpv", {"title": "x", "video": STREAM_V, "audio": None}, network.Route("socks5://127.0.0.1:1080"))
+def test_socks_proxy_goes_through_local_bridge():
+    cmd = player.build_command("mpv", {"title": "x", "video": STREAM_V, "audio": None}, network.Route("socks5://127.0.0.1:1080"))
+    px = [c for c in cmd if c.startswith("--http-proxy=")]
+    assert px and px[0].startswith("--http-proxy=http://127.0.0.1:")
 
 
 def test_settings_roundtrip_and_validation(tmp_path):
@@ -62,7 +63,9 @@ def test_api_never_raises_and_validates(tmp_path):
     assert api.search("")["ok"] is False
     assert api.search("кошки")["items"] == [{"id": "x"}]
     assert api.play("../etc/passwd")["ok"] is False
-    assert api.play("dQw4w9WgXcQ", "4k")["ok"] is False
+    assert api.play({"source": "yt", "id": "../etc/passwd"})["ok"] is False
+    assert api.play({"source": "yt", "id": "dQw4w9WgXcQ"}, "4k")["ok"] is False
+    assert api.play({"source": "ftp", "id": "dQw4w9WgXcQ"})["ok"] is False
     assert api.save_settings("nope")["ok"] is False
     json.dumps(api.get_settings())
 

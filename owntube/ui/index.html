@@ -1,59 +1,118 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="violet">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' https://i.ytimg.com data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: https://i.ytimg.com https://*.userapi.com https://*.okcdn.ru https://*.mycdn.me https://*.vkuser.net; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>own-tube</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<a class="skip" href="#grid">К результатам</a>
-<div class="app">
-  <aside class="stage" aria-hidden="true">
-    <div class="globe"></div>
-    <img class="hero" src="assets/heroine.webp" alt="">
-    <div class="caption"><b>own-tube</b><span>свой клиент YouTube</span></div>
-  </aside>
+<svg class="defs" width="0" height="0" aria-hidden="true">
+ <defs>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11 12 3l9 8M5 10v10h5v-6h4v6h5V10"/></symbol>
+  <symbol id="i-shorts" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="3"/><path d="m10.5 9.5 4 2.5-4 2.5z"/></symbol>
+  <symbol id="i-subs" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="12" rx="2"/><path d="M6 4h12M8 1.5h8"/><path d="m10.5 11.5 3.5 2.5-3.5 2.5z"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M3 6h13M3 12h13M3 18h8M18 14v6l4-3z"/></symbol>
+  <symbol id="i-later" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20s-8-5-8-11a4.5 4.5 0 0 1 8-2.7A4.5 4.5 0 0 1 20 9c0 6-8 11-8 11z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 20h16"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></symbol>
+  <symbol id="i-game" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10v5M4.5 12.5h5M15.5 11.5h.01M18 14h.01"/></symbol>
+  <symbol id="i-news" viewBox="0 0 24 24"><path d="M4 5h13v14a2 2 0 0 0 2 0V9h2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-1-2z"/><path d="M7 9h7M7 13h7M7 17h4"/></symbol>
+  <symbol id="i-sport" viewBox="0 0 24 24"><path d="M7 4h10v5a5 5 0 0 1-10 0zM7 6H3v2a4 4 0 0 0 4 4M17 6h4v2a4 4 0 0 1-4 4M12 14v4m-4 3h8"/></symbol>
+  <symbol id="i-live" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4m8.4-8.4a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2m14.2-14.2a10 10 0 0 1 0 14.2"/></symbol>
+  <symbol id="i-fashion" viewBox="0 0 24 24"><path d="m12 3 1.8 4.7L18.5 9l-4.7 1.8L12 15.5l-1.8-4.7L5.5 9l4.7-1.3zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></symbol>
+  <symbol id="i-learn" viewBox="0 0 24 24"><path d="m2 9 10-5 10 5-10 5zM6 11.5V16c0 1.5 3 3 6 3s6-1.5 6-3v-4.5"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></symbol>
+  <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-9 20-3-9-8-3zM22 2 10 13"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></symbol>
+  <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.7 7L3 21l2-5.5A8 8 0 1 1 21 12z"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m7 4 13 8-13 8z"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4m-5 5 5-5 5 5M4 20h16"/></symbol>
+  <symbol id="i-vk" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="5"/><path d="M7 9c.5 3.5 2.5 6 5.5 6V12c1 0 2.5 1.5 3 3M12.5 12c1.5 0 3-1.5 3.5-3M12.5 9v3"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 18 9 12l6-6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0 0 18c1 0 1.5-.7 1.5-1.5 0-1-1-1.5-1-2.5s.7-1.5 1.7-1.5H17a4 4 0 0 0 4-4c0-4.7-4-8.5-9-8.5z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7.5" r="1"/><circle cx="14.5" cy="7.5" r="1"/></symbol>
+ </defs>
+</svg>
+<a class="skip" href="#content">К содержимому</a>
+<div class="app" id="app">
+  <nav class="side" id="side" aria-label="Разделы"></nav>
 
-  <main class="main">
+  <main class="main" id="content">
     <header class="bar">
+      <div class="src-tabs" role="tablist" aria-label="Источник">
+        <button type="button" role="tab" id="tabYt" aria-selected="true">YouTube</button>
+        <button type="button" role="tab" id="tabVk" aria-selected="false">VK Видео</button>
+      </div>
       <form id="searchForm" class="search" role="search">
-        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <svg class="ico"><use href="#i-search"/></svg>
         <label class="sr" for="q">Поиск</label>
-        <input id="q" type="search" placeholder="Что посмотрим?" autocomplete="off" maxlength="200" autofocus>
+        <input id="q" type="search" placeholder="Поиск на YouTube или ссылка" autocomplete="off" maxlength="300">
         <button class="go" type="submit">Найти</button>
       </form>
-      <div class="seg" role="radiogroup" aria-label="Качество">
+      <div class="seg" id="qualitySeg" role="radiogroup" aria-label="Качество">
         <button type="button" role="radio" data-q="best" aria-checked="true">Лучшее</button>
         <button type="button" role="radio" data-q="1080" aria-checked="false">1080p</button>
         <button type="button" role="radio" data-q="720" aria-checked="false">720p</button>
       </div>
-      <button id="openSettings" class="icon-btn" type="button" aria-label="Настройки" title="Настройки">
-        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-      </button>
+      <button class="chip-btn" id="routeChip" type="button" title="Сеть: прокси и VPN"><span class="dot" id="routeDot"></span><svg class="ico"><use href="#i-globe"/></svg><span id="routeText">Напрямую</span></button>
     </header>
-
     <div id="status" class="status" role="status" aria-live="polite"></div>
-    <section id="grid" class="grid" aria-label="Результаты поиска"></section>
-    <p id="empty" class="empty">Введите запрос, и здесь появятся видео.</p>
+    <div id="view"></div>
   </main>
+
+  <aside class="stage" id="stage" aria-label="Помощница">
+    <div class="globe"></div>
+    <div class="sparks" aria-hidden="true"></div>
+    <img class="hero" id="hero" src="assets/heroines/rei.webp" alt="">
+    <div class="mood" id="mood" aria-hidden="true"></div>
+    <div class="switcher" id="switcher" role="radiogroup" aria-label="Выбор помощницы"></div>
+    <div class="stage-foot">
+      <div class="who"><b id="stName">Рэй</b><span id="stPersona"></span></div>
+      <div class="acts" id="acts"></div>
+    </div>
+  </aside>
 </div>
 
-<dialog id="settings" aria-labelledby="settingsTitle">
-  <form id="settingsForm" method="dialog">
-    <h2 id="settingsTitle">Настройки</h2>
-    <label for="proxy">Прокси (необязательно)</label>
-    <input id="proxy" type="text" placeholder="socks5://127.0.0.1:1080" autocomplete="off" spellcheck="false">
-    <p class="hint">Адрес без логина и пароля. Для поиска подойдёт HTTP и SOCKS, для воспроизведения в mpv пока только HTTP.</p>
-    <label for="mpv">Путь к mpv (необязательно)</label>
-    <input id="mpv" type="text" placeholder="по умолчанию: папка mpv рядом с программой или PATH" autocomplete="off" spellcheck="false">
-    <p id="settingsError" class="err" role="alert"></p>
-    <div class="actions">
-      <button type="button" id="cancelSettings" class="ghost">Отмена</button>
-      <button type="submit" class="go">Сохранить</button>
-    </div>
+<section class="chat closed" id="chat" aria-label="Чат с помощницей">
+  <header class="chat-head">
+    <img id="chatAv" class="av" src="assets/heroines/rei.webp" alt="">
+    <div class="ch-who"><b id="chName">Рэй</b><span>ИИ — второй этап</span></div>
+    <button class="icon-btn sm" id="chatClose" type="button" aria-label="Свернуть чат"><svg class="ico"><use href="#i-close"/></svg></button>
+  </header>
+  <div class="msgs" id="msgs" aria-live="polite"></div>
+  <form class="composer" id="chatForm">
+    <button class="icon-btn" type="button" disabled aria-label="Микрофон (второй этап)" title="Микрофон — второй этап"><svg class="ico"><use href="#i-mic"/></svg></button>
+    <label class="sr" for="chatIn">Сообщение</label>
+    <input id="chatIn" type="text" placeholder="Написать помощнице…" autocomplete="off" maxlength="200">
+    <button class="go sq" type="submit" aria-label="Отправить"><svg class="ico"><use href="#i-send"/></svg></button>
+  </form>
+</section>
+<button class="chat-fab" id="chatFab" type="button" aria-label="Открыть чат с помощницей"><img id="fabAv" src="assets/heroines/rei.webp" alt=""></button>
+
+<div class="menu" id="menu" role="menu" hidden></div>
+<dialog id="plDialog" aria-labelledby="plTitle">
+  <form method="dialog" id="plForm">
+    <h2 id="plTitle">Добавить в плейлист</h2>
+    <div id="plList" class="pl-list"></div>
+    <div class="field"><label class="sr" for="plNew">Новый плейлист</label><input id="plNew" type="text" placeholder="Новый плейлист" maxlength="80"><button class="go" type="submit">Создать</button></div>
+    <div class="actions"><button type="button" class="ghost" id="plClose">Закрыть</button></div>
   </form>
 </dialog>
 <script src="app.js"></script>

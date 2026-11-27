@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 from . import __version__
 from .api import Api
+from .settings import data_dir
+from .tools import resource_dir
 
-UI_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "owntube" / "ui"
+UI_DIR = resource_dir() / "owntube" / "ui"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,14 +19,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--debug", action="store_true", help="включить инструменты разработчика")
     parser.add_argument("--version", action="version", version=f"own-tube {__version__}")
     args = parser.parse_args(argv)
+    log_dir = data_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handlers = [logging.FileHandler(log_dir / "own-tube.log", encoding="utf-8")]
+    if sys.stderr:
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
-                        format="%(asctime)s %(name)s: %(message)s")
+                        format="%(asctime)s %(name)s: %(message)s", handlers=handlers)
 
     import webview  # импорт здесь: тесты и скриншоты обходятся без окна
 
     api = Api()
-    webview.create_window("own-tube", str(UI_DIR / "index.html"), js_api=api,
-                          width=1320, height=840, min_size=(900, 600), background_color="#09081a")
-    webview.start(debug=args.debug, http_server=True)
-    api._player.stop()
+    window = webview.create_window(f"own-tube {__version__}", str(UI_DIR / "index.html"), js_api=api,
+                                   width=1440, height=900, min_size=(960, 620), background_color="#09081a")
+    api._attach(window)
+    webview.start(debug=args.debug, http_server=True, private_mode=True)
+    api._shutdown()
     return 0

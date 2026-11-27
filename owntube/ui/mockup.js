@@ -24,19 +24,19 @@
 
   /* ---------- помощницы (картинки из AmneziaMonitor, примеры персонажей) ---------- */
   const ASSISTANTS = [
-    { id: "default", name: "Рэй", accent: "#a855f7", accent2: "#22d3ee", glow: "rgba(168,85,247,.55)",
+    { id: "rei", name: "Рэй", accent: "#a855f7", accent2: "#22d3ee", glow: "rgba(168,85,247,.55)",
       persona: "Спокойная и точная, чуть загадочная. Отвечает коротко и по делу.",
       voice: "Silero · «Ксения»", model: "Qwen2.5 7B · локально", paid: false },
-    { id: "se", name: "Юки", accent: "#1e8fe0", accent2: "#fecc02", glow: "rgba(30,143,224,.55)",
+    { id: "yuki", name: "Юки", accent: "#1e8fe0", accent2: "#fecc02", glow: "rgba(30,143,224,.55)",
       persona: "Мягкая и заботливая. Объясняет подробно, любит спокойные каналы.",
       voice: "Piper · «Ирина»", model: "Qwen2.5 7B · локально", paid: false },
-    { id: "gb", name: "Кейт", accent: "#e0263f", accent2: "#3a5bd9", glow: "rgba(224,38,63,.5)",
+    { id: "kate", name: "Кейт", accent: "#e0263f", accent2: "#3a5bd9", glow: "rgba(224,38,63,.5)",
       persona: "Бойкая, шутит и подначивает. Подбирает, что посмотреть вечером.",
       voice: "Silero · «Байя»", model: "Grok · платная", paid: true },
-    { id: "in", name: "Лила", accent: "#ff9933", accent2: "#1fae3a", glow: "rgba(255,153,51,.5)",
+    { id: "lila", name: "Лила", accent: "#ff9933", accent2: "#1fae3a", glow: "rgba(255,153,51,.5)",
       persona: "Энергичная, обожает музыку и танцы. Всегда за новый плейлист.",
       voice: "Silero · «Ксения»", model: "Gemini · платная", paid: true },
-    { id: "il", name: "Нина", accent: "#2f63e8", accent2: "#e8f0ff", glow: "rgba(47,99,232,.55)",
+    { id: "nina", name: "Нина", accent: "#2f63e8", accent2: "#e8f0ff", glow: "rgba(47,99,232,.55)",
       persona: "Любит новости и тренды. Всё проверяет в интернете и даёт источники.",
       voice: "Облачный голос", model: "Claude · платная", paid: true },
   ];
