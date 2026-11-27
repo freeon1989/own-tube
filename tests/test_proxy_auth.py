@@ -11,6 +11,9 @@ from owntube.api import Api
 from owntube.secretstore import FileBackend, MemoryBackend, SecretStore
 from owntube.settings import SettingsStore
 
+GOOD = "right-pass"
+BAD = "wrong-pass"
+
 
 def _serve(handler):
     srv = socket.socket()
@@ -40,33 +43,33 @@ def test_host_port_saved_as_socks5(tmp_path):
 
 
 def test_password_not_in_settings_logs_or_repr(tmp_path, caplog):
-    password = "s3cret-PASS-value"
+    secret = "s3cret-PASS-value"
     st = SettingsStore(tmp_path, secrets=SecretStore(tmp_path, MemoryBackend()))
     caplog.set_level(logging.DEBUG)
     api = Api(store=st, start_downloader=False)
-    r = api.save_settings({"proxy": "127.0.0.1:1080", "proxy_user": "alice", "proxy_password": password})
+    r = api.save_settings({"proxy": "127.0.0.1:1080", "proxy_user": "alice", "proxy_password": secret})
     assert r["ok"] and r["settings"]["proxy_password_set"] is True
     assert "proxy_password" not in r["settings"]
     text = (tmp_path / "settings.json").read_text(encoding="utf-8")
-    assert password not in text and "alice" in text
+    assert secret not in text and "alice" in text
     assert "proxy_password" not in text
     for f in tmp_path.rglob("*"):
         if f.is_file():
-            assert password.encode() not in f.read_bytes()
+            assert secret.encode() not in f.read_bytes()
     route = network.ManualProxy(lambda: st.value.proxy, lambda: st.value.proxy_user, st.proxy_password).current()
-    assert password not in repr(route) and password not in str(route)
+    assert secret not in repr(route) and secret not in str(route)
     opts = route.ytdlp_options()
-    assert quote(password, safe="") in opts["proxy"]
-    assert password not in validate.redact(opts["proxy"])
+    assert quote(secret, safe="") in opts["proxy"]
+    assert secret not in validate.redact(opts["proxy"])
     filt = validate.RedactFilter()
     caplog.handler.addFilter(filt)
     logging.getLogger("owntube.test").info("route=%s proxy=%s", route, opts["proxy"])
-    assert password not in caplog.text
+    assert secret not in caplog.text
     assert "***:***@" in caplog.text
 
 
 def test_encrypted_file_backend_hides_plaintext(tmp_path):
-    password = "s3cret-PASS-value"
+    secret = "s3cret-PASS-value"
 
     def protect(data: bytes) -> bytes:
         return b"ENC" + bytes(b ^ 0xA5 for b in data)
@@ -78,10 +81,10 @@ def test_encrypted_file_backend_hides_plaintext(tmp_path):
     note = "test"
     backend = FileBackend(tmp_path / "secrets.dpapi", protect, unprotect, note)
     store = SecretStore(tmp_path, backend)
-    assert store.set(password) is True
+    assert store.set(secret) is True
     raw = (tmp_path / "secrets.dpapi").read_bytes()
-    assert password.encode() not in raw
-    assert store.get() == password
+    assert secret.encode() not in raw
+    assert store.get() == secret
     store.delete()
     assert not (tmp_path / "secrets.dpapi").exists()
 
@@ -124,13 +127,13 @@ def test_socks5_rfc1929_handshake_and_bad_password():
     srv, socks_port = _serve(socks5)
     proxy = f"socks5h://127.0.0.1:{socks_port}"
     try:
-        s = bridge.socks_connect(proxy, "rr1---sn-x.googlevideo.com", 443, user="alice", password="right-pass")
+        s = bridge.socks_connect(proxy, "rr1---sn-x.googlevideo.com", 443, user="alice", password=GOOD)
         s.sendall(b"ping")
         assert s.recv(100) == b"pong:ping"
         s.close()
-        assert seen["auth"] == ("alice", "right-pass")
+        assert seen["auth"] == ("alice", GOOD)
         with pytest.raises(bridge.SocksError, match="логин или пароль"):
-            bridge.socks_connect(proxy, "rr1---sn-x.googlevideo.com", 443, user="alice", password="wrong-pass")
+            bridge.socks_connect(proxy, "rr1---sn-x.googlevideo.com", 443, user="alice", password=BAD)
         with pytest.raises(bridge.SocksError, match="логин и пароль"):
             bridge.socks_connect(proxy, "rr1---sn-x.googlevideo.com", 443)
     finally:
@@ -149,7 +152,7 @@ def test_bridge_with_auth_end_to_end(monkeypatch):
         user = auth[2:2 + ulen].decode()
         plen = auth[2 + ulen]
         pwd = auth[3 + ulen:3 + ulen + plen].decode()
-        if (user, pwd) != ("alice", "right-pass"):
+        if (user, pwd) != ("alice", GOOD):
             c.sendall(b"\x01\x01")
             c.close()
             return
