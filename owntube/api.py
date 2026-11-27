@@ -32,10 +32,10 @@ def safe(fn):
             out = fn(self, *args)
             return {"ok": True, **(out or {})}
         except (ValueError, RouteError, player_mod.PlayerError) as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": validate.redact(str(exc))}
         except Exception as exc:  # сеть, yt-dlp: показываем коротко, подробности в журнал
             log.exception("Ошибка в %s", fn.__name__)
-            return {"ok": False, "error": "Не получилось: " + str(exc).replace("ERROR: ", "")[:200]}
+            return {"ok": False, "error": "Не получилось: " + validate.redact(str(exc)).replace("ERROR: ", "")[:200]}
     return wrapper
 
 
@@ -52,7 +52,11 @@ class Api:
         self._store = store or SettingsStore()
         self._db = db or Store(self._store.dir / "own-tube.db")
         self._player = player or player_mod.Player()
-        self._routes = routes or ManualProxy(lambda: self._store.value.proxy)
+        self._routes = routes or ManualProxy(
+            lambda: self._store.value.proxy,
+            lambda: self._store.value.proxy_user,
+            self._store.proxy_password,
+        )
         self._search = search_fn or yt.search
         self._lock = threading.Lock()
         self._window = None
@@ -64,19 +68,19 @@ class Api:
     # --- состояние и настройки ---
     @safe
     def get_state(self):
-        return {"settings": self._store.value.public(), "counts": self._db.counts(), "version": __version__,
+        return {"settings": self._store.export(), "counts": self._db.counts(), "version": __version__,
                 "tools": {n: bool(find_tool(n, self._store.value.mpv_path if n == "mpv" else ""))
                           for n in ("mpv", "ffmpeg", "deno")},
                 "categories": {k: v[0] for k, v in yt.CATEGORIES.items()}}
 
     def get_settings(self) -> dict:
-        return {"ok": True, "settings": self._store.value.public()}
+        return {"ok": True, "settings": self._store.export()}
 
     @safe
     def save_settings(self, patch):
         with self._lock:
             s = self._store.update(patch)
-        return {"settings": s.public()}
+        return {"settings": self._store.export()}
 
     @safe
     def check_route(self):
@@ -239,7 +243,8 @@ class Api:
         p = self._dialog(True)
         if p is None:
             return {"cancelled": True}
-        return {"settings": self._store.update({"download_dir": str(p)}).public()}
+        self._store.update({"download_dir": str(p)})
+        return {"settings": self._store.export()}
 
     @safe
     def import_takeout(self):
@@ -261,3 +266,41 @@ class Api:
 
     def _shutdown(self) -> None:
         self._player.stop()
+
+    @safe
+    def save_ai_config(self, payload):
+        with self._lock:
+            cfg = self._store.save_ai_config(payload)
+        return {"config": cfg, "settings": self._store.export()}
+
+    @safe
+    def delete_ai_config(self, cfg_id):
+        with self._lock:
+            self._store.delete_ai_config(cfg_id)
+        return {"settings": self._store.export()}
+
+    @safe
+    def check_ai_key(self, payload):
+        """Проверка ключа и список моделей. Ключ из формы или уже сохранённый."""
+        if not isinstance(payload, dict):
+            raise ValueError("Ожидался объект конфигурации")
+        from .ai.config import clean_api_key, clean_base_url, clean_id
+        from .ai.providers import check_connection
+
+        base_url = payload.get("base_url")
+        api_key = payload.get("api_key") or ""
+        cfg_id = payload.get("id")
+        if cfg_id:
+            cfg_id = clean_id(cfg_id)
+            existing = next((c for c in self._store.value.ai_configs if c["id"] == cfg_id), None)
+            if existing is None:
+                raise ValueError("Конфигурация не найдена")
+            base_url = base_url or existing["base_url"]
+            if not api_key:
+                api_key = self._store.ai_api_key(cfg_id)
+        if not api_key:
+            raise ValueError("Введите API-ключ")
+        api_key = clean_api_key(api_key)
+        base_url = clean_base_url(base_url)
+        return check_connection(base_url, api_key, self._routes.current())
+

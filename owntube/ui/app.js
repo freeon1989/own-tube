@@ -406,6 +406,220 @@
   const SB_NAMES = { sponsor: "Реклама спонсора", selfpromo: "Самореклама", interaction: "Просьбы подписаться", intro: "Заставка", outro: "Концовка",
     preview: "Анонс", music_offtopic: "Не музыка в клипах", filler: "Вода" };
 
+
+  function hostPort(url) {
+    return (url || "").replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  }
+
+  function buildNetPanel(netMsg) {
+    let proxyType = S.proxy_type || (String(S.proxy || "").startsWith("http") ? "http" : "socks5");
+    const typeSeg = h("div", { class: "seg", role: "radiogroup", "aria-label": "Тип прокси" },
+      ...[["socks5", "SOCKS5"], ["http", "HTTP"]].map(([id, label]) => {
+        const b = h("button", { type: "button", role: "radio", "aria-checked": String(proxyType === id), "data-type": id }, label);
+        b.addEventListener("click", () => {
+          proxyType = id;
+          typeSeg.querySelectorAll("button").forEach((x) => x.setAttribute("aria-checked", String(x === b)));
+        });
+        return b;
+      }));
+    const proxy = h("input", { type: "text", value: hostPort(S.proxy), placeholder: "127.0.0.1:1080", "aria-label": "Адрес и порт прокси", spellcheck: "false", autocomplete: "off" });
+    const user = h("input", { type: "text", value: S.proxy_user || "", placeholder: "если прокси требует вход", "aria-label": "Логин прокси", spellcheck: "false", autocomplete: "off" });
+    const pass = h("input", { type: "password", value: "", placeholder: S.proxy_password_set ? "сохранён, введите новый чтобы заменить" : "пароль прокси", "aria-label": "Пароль прокси", autocomplete: "new-password" });
+    async function saveProxy() {
+      const patch = { proxy: proxy.value, proxy_type: proxyType, proxy_user: user.value };
+      if (pass.value) patch.proxy_password = pass.value;
+      const r = await call("save_settings", patch);
+      if (!r.ok) {
+        netMsg.textContent = r.error || "Не удалось сохранить";
+        netMsg.className = "note bad-text";
+        status(r.error, "err");
+        return false;
+      }
+      S = r.settings;
+      pass.value = "";
+      pass.placeholder = S.proxy_password_set ? "сохранён, введите новый чтобы заменить" : "пароль прокси";
+      proxy.value = hostPort(S.proxy);
+      const shown = hostPort(S.proxy);
+      netMsg.textContent = S.proxy
+        ? ("Сохранено: " + (String(S.proxy).startsWith("http") ? "HTTP " : "SOCKS5 ") + shown)
+        : "Сохранено: прокси выключен, соединение напрямую";
+      netMsg.className = "note ok-text";
+      if (S.proxy_password_note && S.proxy_password_set && !S.proxy_password_persist) {
+        netMsg.textContent += ". " + S.proxy_password_note;
+      }
+      updateRouteChip();
+      return true;
+    }
+    const clearBtn = h("button", { class: "ghost", type: "button", onclick: async () => {
+      const r = await call("save_settings", { clear_proxy_password: true });
+      if (!r.ok) { netMsg.textContent = r.error || ""; netMsg.className = "note bad-text"; return; }
+      S = r.settings;
+      pass.value = "";
+      pass.placeholder = "пароль прокси";
+      netMsg.textContent = "Пароль удалён";
+      netMsg.className = "note";
+    } }, "Удалить пароль");
+    if (!S.proxy_password_set) clearBtn.hidden = true;
+    return panel("net", "globe", "Сеть: прокси и VPN",
+      "Через прокси идёт только трафик own-tube. Адрес можно указать как хост:порт — по умолчанию это SOCKS5. Для SOCKS-прокси плеер mpv работает через встроенный мост HTTP→SOCKS. Пароль хранится отдельно и шифруется средствами Windows.",
+      field("Тип", typeSeg),
+      field("Адрес и порт", proxy),
+      field("Логин", user),
+      field("Пароль", pass),
+      h("div", { class: "row2" },
+        h("button", { class: "go", type: "button", onclick: saveProxy }, "Сохранить"),
+        h("button", { class: "ghost", type: "button", onclick: async () => {
+          if (!await saveProxy()) return;
+          netMsg.textContent = "Проверяю связь…";
+          netMsg.className = "note";
+          const r = await call("check_route");
+          netMsg.textContent = r.detail || r.error || "";
+          netMsg.className = "note " + (r.ok ? "ok-text" : "bad-text");
+        } }, "Проверить связь"),
+        clearBtn),
+      netMsg,
+      h("p", { class: "note" }, S.proxy_password_note || "Пароль не записывается в settings.json."),
+      h("div", { class: "row asst stub" }, h("span"), h("div", { class: "nm" }, h("b", {}, "VPN AmneziaWG"), h("span", {}, "Выбор своего сервера и маршрут только для own-tube")), h("span"), h("span"), h("span", { class: "pill" }, "скоро")));
+  }
+
+  function buildAiSection() {
+    const wrap = h("div", { class: "ai-wrap" });
+    const formHost = h("div");
+    const listHost = h("div", { class: "ai-list" });
+    const msg = h("p", { class: "note" });
+    const presets = S.ai_presets || [];
+
+    function renderList() {
+      listHost.replaceChildren();
+      const configs = S.ai_configs || [];
+      if (!configs.length) {
+        listHost.appendChild(h("p", { class: "note" }, "Пока нет конфигураций. Добавьте сервер OpenAI, Claude, Grok, Gemini, DeepSeek, OpenRouter или свой (Ollama, LM Studio)."));
+        return;
+      }
+      configs.forEach((c) => {
+        listHost.appendChild(h("div", { class: "ai-card" + (c.active ? " active" : "") },
+          h("div", { class: "nm" },
+            h("b", {}, c.name),
+            h("span", {}, (c.model || "модель не указана") + " · " + hostPort(c.base_url))),
+          c.active ? h("span", { class: "pill local" }, "активна") : h("span"),
+          c.api_key_set ? h("span", { class: "tick on", title: "Ключ сохранён" }, "✓") : h("span", { class: "note" }, "нет ключа"),
+          h("button", { class: "ghost", type: "button", onclick: () => openForm(c) }, "Изменить"),
+          h("button", { class: "ghost", type: "button", onclick: async () => {
+            const r = await call("delete_ai_config", c.id);
+            if (!r.ok) { msg.textContent = r.error || ""; msg.className = "note bad-text"; return; }
+            S = r.settings;
+            formHost.replaceChildren();
+            renderList();
+            msg.textContent = "Конфигурация удалена";
+            msg.className = "note";
+          } }, "Удалить")));
+      });
+    }
+
+    function openForm(cfg) {
+      const isNew = !cfg;
+      cfg = cfg || { name: "", base_url: "", model: "", vision: false, threads: 1, context: 130000, active: false, api_key_set: false };
+      let models = [];
+      const name = h("input", { type: "text", value: cfg.name || "", placeholder: "например, Домашний сервер", "aria-label": "Название конфигурации", spellcheck: "false" });
+      const url = h("input", { type: "text", value: cfg.base_url || "", placeholder: "https://api.openai.com/v1 или http://127.0.0.1:1234/v1", "aria-label": "URL сервера", spellcheck: "false", autocomplete: "off" });
+      const key = h("input", { type: "password", value: "", placeholder: cfg.api_key_set ? "сохранён, введите новый чтобы заменить" : "API-ключ", "aria-label": "API-ключ", autocomplete: "new-password" });
+      const tick = h("span", { class: "tick" + (cfg.api_key_set ? " on" : ""), title: cfg.api_key_set ? "Ключ сохранён" : "Ключ ещё не проверен" }, "✓");
+      const keyMsg = h("span", { class: "note" });
+      const model = h("input", { type: "text", value: cfg.model || "", placeholder: "например local/llama или gpt-4.1", "aria-label": "Название модели", spellcheck: "false", autocomplete: "off" });
+      const suggest = h("ul", { class: "suggest-list", hidden: true, role: "listbox" });
+      function showSuggest() {
+        const q = (model.value || "").toLowerCase();
+        const items = models.filter((m) => !q || m.toLowerCase().includes(q)).slice(0, 50);
+        suggest.replaceChildren();
+        if (!items.length) { suggest.hidden = true; return; }
+        items.forEach((m) => {
+          const li = h("li", { role: "option", onclick: () => { model.value = m; suggest.hidden = true; } }, m);
+          suggest.appendChild(li);
+        });
+        suggest.hidden = false;
+      }
+      model.addEventListener("input", showSuggest);
+      model.addEventListener("focus", showSuggest);
+      model.addEventListener("blur", () => setTimeout(() => { suggest.hidden = true; }, 150));
+      const vision = h("input", { type: "checkbox" }); vision.checked = !!cfg.vision;
+      const threads = h("input", { type: "number", min: "1", max: "64", value: String(cfg.threads || 1), "aria-label": "Число потоков для обработки данных" });
+      const context = h("input", { type: "number", min: "1024", max: "2000000", value: String(cfg.context || 130000), "aria-label": "Объём данных для анализа" });
+      const active = h("input", { type: "checkbox" }); active.checked = !!cfg.active;
+      const presetRow = h("div", { class: "presets" },
+        ...presets.map((p) => {
+          const id = p[0], label = p[1], presetUrl = p[2];
+          const b = h("button", { type: "button" }, label);
+          b.addEventListener("click", () => {
+            if (presetUrl) url.value = presetUrl;
+            if (!name.value) name.value = label;
+            presetRow.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+          });
+          return b;
+        }));
+      async function checkKey() {
+        keyMsg.textContent = "Проверяю…";
+        keyMsg.className = "note";
+        tick.classList.remove("on");
+        const payload = { base_url: url.value, api_key: key.value };
+        if (cfg.id) payload.id = cfg.id;
+        const r = await call("check_ai_key", payload);
+        if (!r.ok) {
+          keyMsg.textContent = r.error || "Не удалось проверить";
+          keyMsg.className = "note bad-text";
+          return;
+        }
+        tick.classList.add("on");
+        keyMsg.textContent = r.detail || "Ключ принят";
+        keyMsg.className = "note ok-text";
+        models = r.models || [];
+        if (models.length && !model.value) model.value = models[0];
+        showSuggest();
+      }
+      formHost.replaceChildren(
+        h("div", { class: "ai-form" },
+          h("h3", {}, isNew ? "Новая конфигурация" : "Изменить конфигурацию"),
+          presetRow,
+          field("Название конфигурации", name),
+          field("URL сервера", url),
+          field("API-ключ", h("div", { class: "key-row" }, key, h("button", { class: "ghost", type: "button", onclick: checkKey }, "Проверить"), tick)),
+          keyMsg,
+          field("Название модели", h("div", { class: "suggest" }, model, suggest)),
+          h("label", { class: "check" }, vision, "Анализировать изображения"),
+          field("Число потоков для обработки данных", threads),
+          field("Объём данных для анализа", context, h("span", { class: "info", title: "Сколько токенов модель может принять за раз: системный текст, история чата и содержимое экрана. 130000 подходит для большинства моделей." }, "что это?")),
+          h("label", { class: "check" }, active, "Сделать модель активной"),
+          h("div", { class: "actions" },
+            h("button", { class: "ghost", type: "button", onclick: () => formHost.replaceChildren() }, "Отмена"),
+            h("button", { class: "go", type: "button", onclick: async () => {
+              const payload = {
+                name: name.value, base_url: url.value, model: model.value,
+                vision: vision.checked, threads: Number(threads.value), context: Number(context.value),
+                active: active.checked,
+              };
+              if (cfg.id) payload.id = cfg.id;
+              if (key.value) payload.api_key = key.value;
+              const r = await call("save_ai_config", payload);
+              if (!r.ok) { msg.textContent = r.error || "Не удалось сохранить"; msg.className = "note bad-text"; return; }
+              S = r.settings;
+              formHost.replaceChildren();
+              renderList();
+              msg.textContent = "Конфигурация сохранена" + ((r.settings && r.settings.secrets_persist === false && key.value) ? ". " + (r.settings.secrets_note || "") : "");
+              msg.className = "note ok-text";
+            } }, "Сохранить"))));
+    }
+
+    renderList();
+    wrap.append(
+      h("div", { class: "row2" }, h("button", { class: "go", type: "button", onclick: () => openForm(null) }, "Добавить конфигурацию")),
+      listHost, formHost, msg,
+      h("p", { class: "note" }, S.secrets_note || "API-ключи шифруются средствами Windows и не записываются в settings.json. Запросы к моделям идут через прокси, если он включён."),
+      h("p", { class: "note" }, "Чат помощниц с выбранной моделью, голос и локальные GGUF — второй этап."),
+    );
+    return panel("ai", "chip", "ИИ — API",
+      "Подключите платную модель или свой сервер с API как у OpenAI (Ollama, LM Studio и другие). Можно сохранить несколько конфигураций и сделать одну активной.",
+      wrap);
+  }
+
   async function showSettings(section) {
     const st = await call("get_state");
     if (!st.ok) { status(st.error, "err"); return; }
@@ -432,7 +646,6 @@
     }));
     const toolPill = (n, label) => h("span", { class: "pill " + (tools[n] ? "local" : "paid") }, label + (tools[n] ? ": есть" : ": не найден"));
 
-    const proxy = h("input", { type: "text", value: S.proxy, placeholder: "socks5://127.0.0.1:1080 или http://127.0.0.1:8080", "aria-label": "Прокси", spellcheck: "false" });
     const netMsg = h("span", { class: "note" });
     const mpvPath = h("input", { type: "text", value: S.mpv_path, placeholder: "по умолчанию: tools\\mpv.exe рядом с программой", "aria-label": "Путь к mpv", spellcheck: "false" });
     const dlDir = h("input", { type: "text", value: S.download_dir, readonly: true, "aria-label": "Папка загрузок" });
@@ -449,14 +662,7 @@
         h("p", { class: "note" }, "SponsorBlock получает только 4 символа хеша от ID видео — какой ролик вы смотрите, сервер не знает."),
         field("Путь к mpv", mpvPath, h("button", { class: "ghost", type: "button", onclick: async () => { if (await saveSettings({ mpv_path: mpvPath.value })) status("Сохранено"); } }, "Сохранить")),
         h("div", { class: "toolstate" }, toolPill("mpv", "mpv"), toolPill("ffmpeg", "ffmpeg (для загрузок)"), toolPill("deno", "deno (для YouTube)"))),
-      panel("net", "globe", "Сеть: прокси и VPN", "Через прокси идёт только трафик own-tube. Для SOCKS-прокси плеер mpv работает через встроенный мост HTTP→SOCKS.",
-        field("Прокси", proxy, h("button", { class: "go", type: "button", onclick: async () => {
-          if (await saveSettings({ proxy: proxy.value })) { netMsg.textContent = "Сохранено"; updateRouteChip(); }
-        } }, "Сохранить"), h("button", { class: "ghost", type: "button", onclick: async () => {
-          const r = await call("check_route"); netMsg.textContent = r.detail || r.error || ""; netMsg.className = "note " + (r.ok ? "ok-text" : "bad-text");
-        } }, "Проверить")),
-        netMsg,
-        h("div", { class: "row asst stub" }, h("span"), h("div", { class: "nm" }, h("b", {}, "VPN AmneziaWG"), h("span", {}, "Выбор своего сервера и маршрут только для own-tube")), h("span"), h("span"), h("span", { class: "pill" }, "скоро"))),
+      buildNetPanel(netMsg),
       panel("data", "folder", "Данные", "Всё хранится только на этом компьютере (SQLite в папке пользователя).",
         field("Google Takeout", h("button", { class: "go", type: "button", onclick: async () => {
           tkMsg.textContent = "Читаю файл…";
@@ -475,8 +681,7 @@
       panel("accounts", "user", "Аккаунты", "Вход даст настоящие подписки, историю и плейлисты с YouTube, а для VK — поиск и ролики 18+.",
         h("div", { class: "row2" }, h("button", { class: "go", type: "button", disabled: true }, "Войти через Google"), h("button", { class: "go", type: "button", disabled: true }, "Войти в VK"), h("span", { class: "pill" }, "второй этап")),
         h("p", { class: "note" }, "Пароль программа не увидит: вход через окно Google/VK, токен будет зашифрован средствами Windows.")),
-      panel("ai", "chip", "ИИ-помощницы", "Чат, зрение, голос, локальные (GGUF, в том числе без цензуры) и платные модели — второй этап. Макет: owntube/ui/mockup.html.",
-        h("div", { class: "row2" }, ...["Чат", "Зрение", "Распознавание речи", "Голос"].map((n) => h("span", { class: "pill" }, n + " — скоро")))),
+      buildAiSection(),
     );
     status("");
     if (section) { const el = $("set-" + section); if (el) el.scrollIntoView({ block: "start" }); }

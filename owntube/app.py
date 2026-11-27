@@ -9,6 +9,7 @@ import sys
 from . import __version__
 from .api import Api
 from .settings import data_dir
+from .validate import RedactFilter
 from .tools import resource_dir
 
 UI_DIR = resource_dir() / "owntube" / "ui"
@@ -30,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
                         format="%(asctime)s %(name)s: %(message)s", handlers=handlers)
+    _redact = RedactFilter()
+    logging.getLogger().addFilter(_redact)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_redact)
 
     import webview  # импорт здесь: тесты и скриншоты обходятся без окна
 

@@ -320,3 +320,25 @@ dialog .field input{flex:1;padding:9px 12px;border-radius:var(--r-sm);border:1px
 .side .nav{padding:6px 10px}
 .side .sec{margin:8px 10px 2px}
 .account{margin-bottom:6px}
+
+.field .seg{flex:none;border:1px solid var(--line-2);border-radius:10px;padding:2px;background:var(--surface-2)}
+.key-row{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.key-row input{flex:1;min-width:0}
+.tick{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);color:transparent;font-size:13px;flex:none}
+.tick.on{color:#052e16;background:var(--ok);border-color:var(--ok);font-weight:700}
+.ai-list{display:flex;flex-direction:column;gap:8px;margin:10px 0}
+.ai-card{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:var(--r-md);border:1px solid var(--line);background:var(--surface)}
+.ai-card.active{border-color:var(--accent-b);box-shadow:0 0 0 1px var(--accent-a)}
+.ai-card .nm{flex:1;min-width:0}
+.ai-card .nm span{display:block;color:var(--muted);font-size:12px;margin-top:2px;word-break:break-all}
+.ai-form{margin-top:14px;padding:16px;border-radius:var(--r-lg);border:1px solid var(--line-2);background:var(--surface)}
+.ai-form h3{margin:0 0 10px;font-size:16px}
+.ai-form .field label{width:240px}
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+.presets button{padding:6px 10px;border-radius:999px;border:1px solid var(--line-2);background:var(--surface-2);font-size:12px;color:var(--text)}
+.presets button:hover,.presets button[aria-pressed=true]{border-color:var(--accent-b);color:#fff}
+.suggest{position:relative;flex:1;min-width:0}
+.suggest-list{position:absolute;z-index:6;left:0;right:0;top:100%;max-height:200px;overflow:auto;margin:2px 0 0;padding:4px;list-style:none;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--surface-solid);box-shadow:0 12px 30px rgba(0,0,0,.4)}
+.suggest-list li{padding:6px 8px;border-radius:6px;cursor:pointer;font:13px var(--mono)}
+.suggest-list li:hover{background:var(--accent-a)}
+.info{color:var(--muted);cursor:help;border-bottom:1px dashed var(--muted);font-size:12px;white-space:nowrap}

@@ -22,11 +22,14 @@ def test_proxy():
     assert v.clean_proxy("") == ""
     assert v.clean_proxy(" SOCKS5://127.0.0.1:1080 ") == "socks5://127.0.0.1:1080"
     assert v.clean_proxy("http://[::1]:8080") == "http://[::1]:8080"
+    assert v.clean_proxy("127.0.0.1:1080") == "socks5://127.0.0.1:1080"
+    assert v.clean_proxy("127.0.0.1:8080", default_scheme="http") == "http://127.0.0.1:8080"
     for bad in ("socks5://u:p@127.0.0.1:1080", "ftp://x:1", "http://host", "http://h:99999", "http://h:1/x",
-                "http://h:1 --x", "127.0.0.1:1080", "http://@h:1"):
+                "http://h:1 --x", "http://@h:1", "host-without-port"):
         with pytest.raises(ValueError):
             v.clean_proxy(bad)
     assert v.is_http_proxy("http://h:1") and not v.is_http_proxy("socks5://h:1")
+    assert "p@ss" not in v.redact("socks5://u:p@ss@127.0.0.1:1080")
 
 
 def test_stream_url():

@@ -22,3 +22,8 @@ models/
 *.env
 .env*
 secrets*
+!owntube/secretstore.py
+
+*.dpapi
+proxy_password*
+secrets.dpapi

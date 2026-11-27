@@ -44,7 +44,7 @@ def run(path: str) -> int:
     step("search", lambda: [i["title"][:40] for i in search.search("lofi hip hop", route, 3)])
     step("stream_720_h264", lambda: validate.is_stream_url(player.resolve_streams("yt", "jNQXAC9IVRw", "720", route, "h264")["video"]))
     step("sponsorblock", lambda: len(sponsorblock.segments("jNQXAC9IVRw", ["sponsor"], route)) >= 0)
-    step("ui_files", lambda: sorted(p.name for p in (player.resource_dir() / "owntube" / "ui").glob("*.*")))
+    step("ui_files", lambda: all((player.resource_dir() / "owntube" / "ui" / n).is_file() for n in ("index.html", "style.css", "app.js")))
     step("skip_script", lambda: player.SKIP_SCRIPT.is_file())
 
     def dbtest():
