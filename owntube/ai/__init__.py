@@ -1,4 +1,4 @@
 # -*- coding: utf-8 -*-
-"""Подключение к моделям по API. Чат помощниц — второй этап."""
-from .config import PRESETS, PublicConfig, clean_config, public_config
-from .providers import check_connection, list_models
+"""Подключение к моделям по API и чат помощниц."""
+from .config import PRESETS, clean_config, public_config
+from .providers import ProviderError, chat_stream, check_connection, list_models

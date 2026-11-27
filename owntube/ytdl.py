@@ -2,8 +2,12 @@
 """Общие настройки yt-dlp и безопасное чтение небольших ответов (RSS, SponsorBlock) через тот же маршрут."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
+import tempfile
+from typing import Callable
 
 from .network import Route
 from .tools import find_tool
@@ -26,6 +30,49 @@ class _Log:
 
     def error(self, msg):
         self._log.warning(msg)
+
+
+_cookie_provider: Callable[[], str] | None = None
+
+
+def set_cookie_provider(fn: Callable[[], str] | None) -> None:
+    """Источник cookies вошедших аккаунтов (текст Netscape). Задаёт Api."""
+    global _cookie_provider
+    _cookie_provider = fn
+
+
+@contextlib.contextmanager
+def YDL(opts: dict):
+    """yt_dlp.YoutubeDL с cookies аккаунтов во временном файле (права 600), удаляется сразу после."""
+    import yt_dlp
+
+    text = ""
+    if _cookie_provider is not None:
+        try:
+            text = _cookie_provider() or ""
+        except Exception:
+            text = ""
+    path = None
+    if text:
+        fd, path = tempfile.mkstemp(prefix="owntube-c-", suffix=".txt")
+        try:
+            os.write(fd, text.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        opts = {**opts, "cookiefile": path}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            yield ydl
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def base_options(route: Route, **extra) -> dict:
@@ -51,10 +98,9 @@ def base_options(route: Route, **extra) -> dict:
 
 def fetch(url: str, route: Route, accept: str = "*/*") -> bytes:
     """GET через сетевой стек yt-dlp (понимает и HTTP, и SOCKS-прокси). Ответ ограничен по размеру."""
-    import yt_dlp
     from yt_dlp.networking import Request
 
-    with yt_dlp.YoutubeDL(base_options(route)) as ydl:
+    with YDL(base_options(route)) as ydl:
         with ydl.urlopen(Request(url, headers={"Accept": accept})) as resp:
             body = resp.read(MAX_BODY + 1)
     if len(body) > MAX_BODY:

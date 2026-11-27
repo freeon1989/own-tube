@@ -48,6 +48,8 @@ class Settings:
     quality: str = "best"
     codec: str = "auto"      # auto | h264
     mpv_path: str = ""       # пусто: искать mpv рядом с программой и в PATH
+    player_mode: str = "embedded"  # embedded: в окне программы | mpv: отдельное окно
+    vk_adult: bool = False   # 18+ в поиске VK (только после входа в VK)
     sponsorblock: bool = True
     sb_categories: list = field(default_factory=lambda: ["sponsor", "selfpromo", "interaction"])
     theme: str = "assistant"  # assistant: тема выбранной помощницы
@@ -100,6 +102,7 @@ def _validated(raw: dict, strict: bool = False) -> Settings:
     take("proxy_user", validate.clean_proxy_user)
     take("ai_configs", _clean_ai_configs)
     take("quality", validate.clean_quality)
+    take("player_mode", lambda v: validate.clean_choice(v, ("embedded", "mpv"), "режим плеера"))
     take("codec", lambda v: validate.clean_choice(v, validate.CODECS, "кодек"))
     take("theme", lambda v: validate.clean_choice(v, validate.THEMES, "тема"))
     take("assistant", lambda v: validate.clean_choice(v, ASSISTANT_IDS, "помощница"))
@@ -110,6 +113,7 @@ def _validated(raw: dict, strict: bool = False) -> Settings:
         return v
 
     take("sponsorblock", boolean)
+    take("vk_adult", boolean)
 
     def cats(v):
         if not isinstance(v, list) or any(c not in validate.SB_CATEGORIES for c in v):

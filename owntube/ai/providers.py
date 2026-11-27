@@ -1,133 +1,116 @@
 # -*- coding: utf-8 -*-
-"""Проверка ключа и список моделей. Чат — заготовка для второго этапа.
+"""Провайдеры моделей: список моделей и потоковый чат.
 
-Запросы идут через текущий Route (тот же прокси, что у клиента). Ключ только в заголовке,
-в журнал и в текст ошибки не попадает.
+Три вида API:
+* OpenAI-совместимый (OpenAI, xAI, DeepSeek, OpenRouter, Gemini через /openai, Ollama, LM Studio, свой сервер);
+* Anthropic Messages (api.anthropic.com);
+* Google Gemini (generativelanguage.googleapis.com без /openai).
+
+Запросы идут через маршрут own-tube; частные адреса (LAN, VPN, localhost) — напрямую.
+Ключ только в заголовке; в журнал и в текст ошибки не попадает.
 """
 from __future__ import annotations
 
 import json
-import ssl
-from urllib.parse import urlsplit
+from typing import Iterator
+from urllib.parse import quote, urlsplit
 
-from .. import validate
-from ..bridge import SocksError, http_connect, socks_connect
+from .. import httpc, validate
 from ..network import Route
 from .config import clean_base_url, clean_model_name
 
 MAX_BODY = 2 * 1024 * 1024
-TIMEOUT = 20
+LIST_TIMEOUT = 20
+CHAT_TIMEOUT = 180  # локальная модель может долго думать до первого слова
 
 
-def _connect(host: str, port: int, scheme: str, route: Route, timeout: float):
-    if route.direct:
-        sock = __import__("socket").create_connection((host, port), timeout=timeout)
-    elif validate.is_socks_proxy(route.proxy):
-        sock = socks_connect(route.proxy, host, port, timeout=timeout,
-                             user=route.user, password=route.password)
+class ProviderError(ValueError):
+    """Ошибка API с текстом для пользователя (без секретов)."""
+
+
+def kind_of(base_url: str) -> str:
+    parts = urlsplit(base_url)
+    host = (parts.hostname or "").lower()
+    if host == "anthropic.com" or host.endswith(".anthropic.com"):
+        return "anthropic"
+    if host == "generativelanguage.googleapis.com" and "/openai" not in parts.path:
+        return "gemini"
+    return "openai"
+
+
+def _headers(kind: str, api_key: str) -> dict[str, str]:
+    h = {"Accept": "application/json"}
+    if not api_key:
+        return h
+    if kind == "anthropic":
+        h.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
+    elif kind == "gemini":
+        h["x-goog-api-key"] = api_key
     else:
-        sock = http_connect(route.proxy, host, port, timeout=timeout,
-                            user=route.user, password=route.password)
-    if scheme == "https":
-        ctx = ssl.create_default_context()
-        sock = ctx.wrap_socket(sock, server_hostname=host)
-    sock.settimeout(timeout)
-    return sock
+        h["Authorization"] = f"Bearer {api_key}"
+    return h
 
 
-def request(method: str, url: str, route: Route, headers: dict[str, str] | None = None,
-            body: bytes | None = None, timeout: float = TIMEOUT) -> tuple[int, bytes]:
-    """HTTP(S) через Route. Редиректы не следуем. URL уже должен быть проверен."""
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https"):
-        raise ValueError("Поддерживаются только http и https")
-    host = parts.hostname or ""
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    path = parts.path or "/"
-    if parts.query:
-        path += "?" + parts.query
-    hdrs = {"Host": host if port in (80, 443) else f"{host}:{port}",
-            "Accept": "application/json",
-            "Connection": "close",
-            "User-Agent": "own-tube"}
-    if body is not None:
-        hdrs["Content-Length"] = str(len(body))
-    if headers:
-        hdrs.update(headers)
-    lines = [f"{method} {path} HTTP/1.1"]
-    for k, v in hdrs.items():
-        # не кладём значение заголовка Authorization в исключение
-        if "\r" in k or "\n" in k or "\r" in v or "\n" in v:
-            raise ValueError("Некорректный заголовок")
-        lines.append(f"{k}: {v}")
-    raw = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + (body or b"")
-    sock = _connect(host, port, parts.scheme, route, timeout)
+def _hide(text: str, api_key: str) -> str:
+    text = validate.redact(text or "")
+    if api_key and len(api_key) >= 6:
+        text = text.replace(api_key, "***")
+    return text
+
+
+def _status_error(code: int, body: bytes = b"", api_key: str = "") -> str:
+    detail = ""
     try:
-        sock.sendall(raw)
-        data = b""
-        while b"\r\n\r\n" not in data:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-            if len(data) > MAX_HEADER:
-                raise ValueError("Слишком длинный ответ сервера")
-        head, _, rest = data.partition(b"\r\n\r\n")
-        first = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
-        bits = first.split(" ", 2)
-        code = int(bits[1]) if len(bits) >= 2 and bits[1].isdigit() else 0
-        body_buf = rest
-        while len(body_buf) <= MAX_BODY:
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            body_buf += chunk
-            if len(body_buf) > MAX_BODY:
-                raise ValueError("Слишком большой ответ сервера")
-        return code, body_buf
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+        data = json.loads(body.decode("utf-8", "replace")) if body else None
+        err = data.get("error") if isinstance(data, dict) else None
+        if isinstance(err, dict):
+            detail = str(err.get("message") or "")
+        elif isinstance(err, str):
+            detail = err
+        elif isinstance(data, dict) and isinstance(data.get("message"), str):
+            detail = data["message"]
+    except (ValueError, AttributeError):
+        pass
+    detail = _hide(detail, api_key)[:200]
+    if code in (401, 403):
+        base = "Ключ отклонён сервером"
+    elif code == 404:
+        base = "Сервер не нашёл адрес (проверьте URL, обычно он оканчивается на /v1, и название модели)"
+    elif code == 429:
+        base = "Сервер просит подождать: слишком много запросов или кончился лимит"
+    elif code >= 500:
+        base = "Сервер моделей временно недоступен"
+    else:
+        base = f"Сервер вернул код {code}"
+    return base + (f": {detail}" if detail else "")
 
 
-MAX_HEADER = 16384
+def _net_error(exc: Exception, api_key: str) -> ProviderError:
+    from ..bridge import SocksError
 
-
-def _auth_headers(base_url: str, api_key: str) -> dict[str, str]:
-    host = (urlsplit(base_url).hostname or "").lower()
-    if host.endswith("anthropic.com"):
-        return {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-    return {"Authorization": f"Bearer {api_key}"}
-
-
-def _models_url(base_url: str) -> str:
-    return base_url.rstrip("/") + "/models"
+    if isinstance(exc, SocksError):
+        return ProviderError("Прокси: " + _hide(str(exc), api_key))
+    if isinstance(exc, TimeoutError):
+        return ProviderError("Сервер моделей не ответил вовремя")
+    if isinstance(exc, OSError):
+        return ProviderError("Не удалось связаться с сервером моделей: " + _hide(exc.strerror or str(exc), api_key))
+    return ProviderError(_hide(str(exc), api_key)[:200])
 
 
 def _parse_models(payload: object) -> list[str]:
     names: list[str] = []
+    items = []
     if isinstance(payload, dict):
-        data = payload.get("data")
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict) and isinstance(item.get("id"), str):
-                    names.append(item["id"])
-                elif isinstance(item, str):
-                    names.append(item)
-        elif isinstance(payload.get("models"), list):
-            for item in payload["models"]:
-                if isinstance(item, dict) and isinstance(item.get("id") or item.get("name"), str):
-                    names.append(item.get("id") or item.get("name"))
-                elif isinstance(item, str):
-                    names.append(item)
+        items = payload.get("data") if isinstance(payload.get("data"), list) else payload.get("models") or []
     elif isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict) and isinstance(item.get("id"), str):
-                names.append(item["id"])
-            elif isinstance(item, str):
-                names.append(item)
+        items = payload
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, str):
+            names.append(item)
+        elif isinstance(item, dict):
+            n = item.get("id") or item.get("name") or item.get("model")
+            if isinstance(n, str):
+                names.append(n[7:] if n.startswith("models/") else n)
     out, seen = [], set()
     for n in names:
         try:
@@ -140,46 +123,144 @@ def _parse_models(payload: object) -> list[str]:
     return out
 
 
-def _status_error(code: int) -> str:
-    if code in (401, 403):
-        return "Ключ отклонён сервером"
-    if code == 404:
-        return "Сервер не нашёл список моделей (проверьте URL, обычно он оканчивается на /v1)"
-    if code == 429:
-        return "Сервер просит подождать (слишком много запросов)"
-    if code >= 500:
-        return "Сервер моделей временно недоступен"
-    return f"Сервер вернул код {code}"
-
-
 def list_models(base_url: str, api_key: str, route: Route) -> list[str]:
-    url = _models_url(clean_base_url(base_url))
+    base = clean_base_url(base_url)
+    kind = kind_of(base)
     try:
-        code, body = request("GET", url, route, headers=_auth_headers(url, api_key))
-    except SocksError as exc:
-        raise ValueError(validate.redact(str(exc))) from exc
-    except OSError as exc:
-        raise ValueError("Не удалось связаться с сервером моделей: " + (exc.strerror or str(exc))) from exc
+        code, _, body = httpc.get(base.rstrip("/") + "/models", route, _headers(kind, api_key),
+                                  limit=MAX_BODY, timeout=LIST_TIMEOUT)
+    except ValueError as exc:
+        raise ProviderError(_hide(str(exc), api_key)) from exc
+    except Exception as exc:
+        raise _net_error(exc, api_key) from exc
     if code != 200:
-        raise ValueError(_status_error(code))
+        raise ProviderError(_status_error(code, body, api_key))
     try:
         payload = json.loads(body.decode("utf-8")) if body else {}
     except ValueError as exc:
-        raise ValueError("Сервер вернул не JSON") from exc
+        raise ProviderError("Сервер вернул не JSON") from exc
     models = _parse_models(payload)
     if not models:
-        raise ValueError("Ключ принят, но список моделей пуст")
+        raise ProviderError("Сервер ответил, но список моделей пуст")
     return models
 
 
 def check_connection(base_url: str, api_key: str, route: Route) -> dict:
-    """Проверка ключа: GET /models. Возвращает {ok, models} или бросает ValueError без секретов."""
-    if not api_key:
-        raise ValueError("Введите API-ключ")
     models = list_models(base_url, api_key, route)
-    return {"ok": True, "models": models, "detail": f"Ключ принят, моделей: {len(models)}"}
+    via = "напрямую (частный адрес)" if httpc.is_private_host(urlsplit(clean_base_url(base_url)).hostname or "") \
+        else ("через прокси" if not route.direct else "напрямую")
+    return {"ok": True, "models": models, "detail": f"Ключ принят, моделей: {len(models)} · {via}"}
 
 
 def chat_completions_url(base_url: str) -> str:
-    """Заготовка для второго этапа: адрес chat/completions."""
     return clean_base_url(base_url).rstrip("/") + "/chat/completions"
+
+
+# ---------- чат ----------
+def _request_for(kind: str, base: str, model: str, system: str, messages: list[dict], max_tokens: int):
+    if kind == "anthropic":
+        body = {"model": model, "max_tokens": max_tokens, "system": system, "stream": True,
+                "messages": [{"role": m["role"], "content": m["content"]} for m in messages]}
+        return base.rstrip("/") + "/messages", body
+    if kind == "gemini":
+        m = model[7:] if model.startswith("models/") else model
+        body = {"systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "model" if x["role"] == "assistant" else "user", "parts": [{"text": x["content"]}]}
+                             for x in messages],
+                "generationConfig": {"maxOutputTokens": max_tokens}}
+        return f"{base.rstrip('/')}/models/{quote(m, safe='-._')}:streamGenerateContent?alt=sse", body
+    body = {"model": model, "stream": True,
+            "messages": [{"role": "system", "content": system}] + [{"role": m["role"], "content": m["content"]} for m in messages]}
+    return chat_completions_url(base), body
+
+
+def _delta(kind: str, event: dict) -> str:
+    if kind == "anthropic":
+        if event.get("type") == "content_block_delta":
+            d = event.get("delta") or {}
+            return d.get("text") or ""
+        if event.get("type") == "error":
+            raise ProviderError("Ошибка модели: " + str((event.get("error") or {}).get("message") or "")[:200])
+        return ""
+    if kind == "gemini":
+        out = []
+        for c in event.get("candidates") or []:
+            for p in ((c or {}).get("content") or {}).get("parts") or []:
+                if isinstance(p, dict) and isinstance(p.get("text"), str):
+                    out.append(p["text"])
+        return "".join(out)
+    if isinstance(event.get("error"), (dict, str)):
+        err = event["error"]
+        raise ProviderError("Ошибка модели: " + str(err.get("message") if isinstance(err, dict) else err)[:200])
+    text = []
+    for ch in event.get("choices") or []:
+        d = (ch or {}).get("delta") or (ch or {}).get("message") or {}
+        if isinstance(d.get("content"), str):
+            text.append(d["content"])
+    return "".join(text)
+
+
+def chat_stream(cfg: dict, api_key: str, system: str, messages: list[dict], route: Route,
+                max_tokens: int = 1024) -> Iterator[str]:
+    """Отдаёт текст ответа кусками по мере прихода. Ошибки — ProviderError без секретов."""
+    base = clean_base_url(cfg.get("base_url"))
+    model = clean_model_name(cfg.get("model"))
+    if not model:
+        raise ProviderError("В активной конфигурации не указана модель")
+    kind = kind_of(base)
+    url, body = _request_for(kind, base, model, system, messages, max_tokens)
+    headers = _headers(kind, api_key)
+    headers.update({"Content-Type": "application/json", "Accept": "text/event-stream, application/json"})
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    try:
+        resp = httpc.open_url("POST", url, route, headers, data, timeout=CHAT_TIMEOUT)
+    except ValueError as exc:
+        raise ProviderError(_hide(str(exc), api_key)) from exc
+    except Exception as exc:
+        raise _net_error(exc, api_key) from exc
+    try:
+        if resp.status != 200:
+            raise ProviderError(_status_error(resp.status, resp.read(8192), api_key))
+        ctype = (resp.getheader("Content-Type") or "").lower()
+        if "event-stream" not in ctype:
+            # сервер не умеет потоком — пришёл обычный JSON целиком
+            raw = resp.read(MAX_BODY)
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except ValueError as exc:
+                raise ProviderError("Сервер вернул не JSON") from exc
+            if kind == "anthropic":
+                text = "".join(b.get("text", "") for b in payload.get("content") or [] if isinstance(b, dict))
+            else:
+                text = _delta(kind, payload)
+            if text:
+                yield text
+            return
+        total = 0
+        while True:
+            try:
+                line = resp.readline(65536)
+            except Exception as exc:
+                raise _net_error(exc, api_key) from exc
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith(b"data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == b"[DONE]":
+                break
+            try:
+                event = json.loads(payload.decode("utf-8"))
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            piece = _delta(kind, event)
+            if piece:
+                total += len(piece)
+                if total > MAX_BODY:
+                    break
+                yield piece
+    finally:
+        resp.close()

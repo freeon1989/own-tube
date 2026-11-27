@@ -33,6 +33,55 @@ def format_selector(quality: str, codec: str = "auto") -> str:
     return plain
 
 
+def embedded_selector(quality: str, codec: str = "auto") -> str:
+    """Форматы, которые WebView2 (Chromium) играет без перекодирования: VP9+Opus в WebM или H.264+AAC в MP4.
+    AV1 не берём: в Windows для него нужен отдельный кодек."""
+    quality = validate.clean_quality(quality)
+    codec = validate.clean_choice(codec, validate.CODECS, "кодек")
+    h = "" if quality == "best" else f"[height<={quality}]"
+    h264 = f"bv*{h}[vcodec^=avc1]+ba[acodec^=mp4a]/b{h}[vcodec^=avc1][acodec^=mp4a]/b[vcodec^=avc1]"
+    if codec == "h264":
+        return h264 + "/b"
+    return f"bv*{h}[vcodec^=vp9]+ba[acodec=opus]/bv*{h}[vcodec^=vp09]+ba[acodec=opus]/" + h264 + "/b"
+
+
+def container_for(vcodec: str | None, acodec: str | None) -> str:
+    v = (vcodec or "").lower()
+    a = (acodec or "").lower()
+    if v.startswith(("vp9", "vp09", "vp8", "av01")) and (not a or a == "none" or a.startswith(("opus", "vorbis"))):
+        return "webm"
+    return "mp4"
+
+
+def ffmpeg_command(ffmpeg: str, streams: dict, start: float = 0.0, http_proxy: str = "") -> list[str]:
+    """Перепаковка без перекодирования в поток для <video>. Адреса проверены, процесс — без shell."""
+    if not validate.is_stream_url(streams.get("video"), streams.get("source", "yt")):
+        raise PlayerError("Небезопасный адрес потока")
+    start = max(0.0, float(start or 0))
+    common = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "4"]
+    if streams.get("user_agent"):
+        common += ["-user_agent", streams["user_agent"]]
+    if streams.get("referer"):
+        common += ["-referer", streams["referer"]]
+    if http_proxy:
+        common += ["-http_proxy", http_proxy]
+    seek = ["-ss", f"{start:.2f}"] if start > 0 else []
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    cmd += common + seek + ["-i", streams["video"]]
+    if streams.get("audio"):
+        if not validate.is_stream_url(streams["audio"], streams.get("source", "yt")):
+            raise PlayerError("Небезопасный адрес звука")
+        cmd += common + seek + ["-i", streams["audio"], "-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+    cmd += ["-c", "copy", "-sn", "-dn"]
+    if streams.get("container") == "webm":
+        cmd += ["-f", "webm", "-cluster_time_limit", "2000", "-live", "1"]
+    else:
+        cmd += ["-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof"]
+    return cmd + ["pipe:1"]
+
+
 def find_mpv(configured: str = "") -> str:
     found = find_tool("mpv", configured)
     if not found:
@@ -41,14 +90,16 @@ def find_mpv(configured: str = "") -> str:
     return found
 
 
-def resolve_streams(source: str, item_id: str, quality: str, route: Route = Route(), codec: str = "auto") -> dict:
-    """Возвращает {title, video, audio|None, user_agent, referer}. Все адреса проверены."""
+def resolve_streams(source: str, item_id: str, quality: str, route: Route = Route(), codec: str = "auto",
+                    embedded: bool = False) -> dict:
+    """Возвращает {title, video, audio|None, user_agent, referer, ...}. Все адреса проверены."""
     import yt_dlp
 
     url = validate.item_url(source, item_id)
-    opts = ytdl.base_options(route, format=format_selector(quality, codec))
+    fmt = embedded_selector(quality, codec) if embedded else format_selector(quality, codec)
+    opts = ytdl.base_options(route, format=fmt)
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with ytdl.YDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as exc:
         raise PlayerError("Видео не открылось: " + str(exc).replace("ERROR: ", "")[:300]) from exc
@@ -74,9 +125,21 @@ def pick_streams(info: dict, source: str = "yt") -> dict:
     headers = video.get("http_headers") or info.get("http_headers") or {}
     ua = headers.get("User-Agent")
     ref = headers.get("Referer")
-    ok = lambda v, n: isinstance(v, str) and v.isprintable() and len(v) < n and "," not in v  # noqa: E731
+    # Запятая допустима («KHTML, like Gecko»): значение уходит отдельным аргументом, без shell и без списков опций
+    ok = lambda v, n: isinstance(v, str) and v.isprintable() and len(v) < n and not v.startswith("-")  # noqa: E731
+    dur = info.get("duration")
+    vcodec = video.get("vcodec") if video.get("vcodec") not in (None, "none") else None
+    acodec = (audio or {}).get("acodec") or (video.get("acodec") if video.get("acodec") not in (None, "none") else None)
     return {
         "title": validate.clean_text(info.get("title"), 200) or "own-tube",
+        "channel": validate.clean_text(info.get("channel") or info.get("uploader"), 120),
+        "channel_id": info.get("channel_id") if validate.is_channel_id(info.get("channel_id")) else "",
+        "duration": float(dur) if isinstance(dur, (int, float)) and dur > 0 else 0.0,
+        "height": video.get("height") if isinstance(video.get("height"), int) else None,
+        "vcodec": vcodec, "acodec": acodec,
+        "container": container_for(vcodec, acodec),
+        "live": bool(info.get("is_live")),
+        "source": source,
         "video": video["url"],
         "audio": audio["url"] if audio else None,
         "user_agent": ua if ok(ua, 300) else None,

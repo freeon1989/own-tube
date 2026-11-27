@@ -14,7 +14,8 @@ import sys
 import threading
 from pathlib import Path
 
-from . import __version__, search as yt, sponsorblock, takeout, validate, vk
+from . import __version__, accounts as acc_mod, diagnostics, search as yt, sponsorblock, takeout, validate, vk, ytdl
+from .ai import assistant as ai_assistant
 from . import player as player_mod
 from .db import Store, clean_item
 from .downloads import Downloader
@@ -61,6 +62,18 @@ class Api:
         self._lock = threading.Lock()
         self._window = None
         self._dl = Downloader(self._db, lambda: self._store.value, self._routes.current) if start_downloader else None
+        self._accounts = acc_mod.Accounts(self._store.secrets, self._store.dir)
+        ytdl.set_cookie_provider(self._accounts.cookie_text)
+        self._media = None
+        self._jobs = ai_assistant.Jobs()
+        self._watch: dict = {}
+
+    def _media_server(self):
+        with self._lock:
+            if self._media is None:
+                from .media import MediaServer
+                self._media = MediaServer(self._routes.current, lambda: find_tool("ffmpeg"))
+            return self._media
 
     def _attach(self, window) -> None:
         self._window = window
@@ -71,7 +84,8 @@ class Api:
         return {"settings": self._store.export(), "counts": self._db.counts(), "version": __version__,
                 "tools": {n: bool(find_tool(n, self._store.value.mpv_path if n == "mpv" else ""))
                           for n in ("mpv", "ffmpeg", "deno")},
-                "categories": {k: v[0] for k, v in yt.CATEGORIES.items()}}
+                "categories": {k: v[0] for k, v in yt.CATEGORIES.items()},
+                "media": self._media_server().base}
 
     def get_settings(self) -> dict:
         return {"ok": True, "settings": self._store.export()}
@@ -84,7 +98,37 @@ class Api:
 
     @safe
     def check_route(self):
-        return self._routes.check()
+        """Проверка по шагам: TCP, вход на прокси, youtube.com, обложки, поиск yt-dlp."""
+        if not isinstance(self._routes, ManualProxy):
+            return self._routes.check()  # свой провайдер маршрута (например, будущий VPN) проверяет себя сам
+        out = diagnostics.run(self._routes.current(), self._search)
+        for st in out["steps"]:
+            log.info("Проверка связи: %s — %s (%s)", st["name"], "OK" if st["ok"] else "сбой", st["detail"])
+        return out
+
+    @safe
+    def read_log(self, lines=300):
+        """Последние строки журнала. Пароли, ключи и логины в адресах вырезаются."""
+        n = _int(lines) if lines is not None else 300
+        n = max(10, min(n, 2000))
+        path = self._store.dir / "own-tube.log"
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 512 * 1024))
+                tail = fh.read().decode("utf-8", "replace").splitlines()[-n:]
+        except FileNotFoundError:
+            tail = []
+        secrets_now = [self._store.proxy_password()] + [self._store.ai_api_key(c["id"]) for c in self._store.value.ai_configs]
+        out = []
+        for line in tail:
+            line = validate.redact(line)
+            for sec in secrets_now:
+                if sec and len(sec) >= 4:
+                    line = line.replace(sec, "***")
+            out.append(line)
+        return {"lines": out, "path_hint": "own-tube.log в папке данных программы"}
 
     # --- ленты и поиск ---
     @safe
@@ -93,7 +137,11 @@ class Api:
         q = validate.clean_query(query)
         route = self._routes.current()
         if source == "vk":
-            return {"items": [vk.open_link(q, route)]}
+            if validate.parse_vk_link(q):
+                return {"items": [vk.open_link(q, route)]}
+            cookie = self._accounts.cookie_header("vk", "login.vk.com")
+            res = vk.search(q, route, cookie, adult=self._store.value.vk_adult)
+            return res
         vid = validate.parse_youtube_link(q)
         if vid:
             return {"items": [{"source": "yt", "id": vid, "title": "Видео по ссылке", "channel": "",
@@ -253,19 +301,196 @@ class Api:
             return {"cancelled": True}
         return {"summary": takeout.import_path(p, self._db)}
 
-    # --- помощница (ИИ подключается на этапе 2) ---
+    # --- встроенный плеер ---
     @safe
-    def assistant_say(self, text):
-        validate.clean_query(text)
-        return {"reply": "Я пока без мозгов: ИИ подключим на втором этапе. "
-                         "Уже сейчас могу улыбаться и махать рукой."}
+    def watch(self, item, quality=None):
+        """Видео внутри окна: yt-dlp выбирает потоки, ffmpeg без перекодирования отдаёт их в <video>."""
+        v = clean_item(item)
+        s = self._store.value
+        if not find_tool("ffmpeg"):
+            raise ValueError("Для встроенного плеера нужен ffmpeg (папка tools рядом с программой)")
+        q = validate.clean_quality(quality) if quality is not None else s.quality
+        route = self._routes.current()
+        streams = player_mod.resolve_streams(v["source"], v["id"], q, route, s.codec, embedded=True)
+        if streams.get("live"):
+            raise ValueError("Прямые эфиры пока открываются только в отдельном окне (mpv)")
+        segs = []
+        if v["source"] == "yt" and s.sponsorblock:
+            try:
+                segs = sponsorblock.segments(v["id"], s.sb_categories, route)
+            except Exception:
+                segs = []
+        media = self._media_server()
+        sid = media.add_session(streams)
+        with self._lock:
+            self._watch = {"sid": sid, "item": v}
+        title = streams.get("title") or v["title"]
+        self._db.add_history({**item, **v, "title": title})
+        return {"sid": sid, "url": media.video_url(sid, 0), "base": media.base, "title": title,
+                "channel": streams.get("channel") or v.get("channel") or "",
+                "channel_id": streams.get("channel_id") or v.get("channel_id") or "",
+                "duration": streams.get("duration") or 0, "height": streams.get("height") or 0,
+                "container": streams.get("container"), "segments": [[a, b] for a, b in segs],
+                "quality": q}
 
     @safe
+    def seek_url(self, sid, start):
+        media = self._media_server()
+        if not isinstance(sid, str) or sid != self._watch.get("sid"):
+            raise ValueError("Видео уже закрыто")
+        if isinstance(start, bool) or not isinstance(start, (int, float)) or start < 0 or start > 86400 * 2:
+            raise ValueError("Некорректная позиция")
+        return {"url": media.video_url(sid, float(start))}
+
+    @safe
+    def stop_watch(self):
+        if self._media is not None:
+            self._media.stop_all()
+        with self._lock:
+            self._watch = {}
+
+    @safe
+    def related(self, item):
+        v = clean_item(item)
+        if v["source"] != "yt":
+            cookie = self._accounts.cookie_header("vk", "login.vk.com")
+            res = vk.search(v["title"][:80] or "видео", self._routes.current(), cookie)
+            return {"items": [x for x in res["items"] if x["id"] != v["id"]][:16]}
+        q = (v["channel"] + " " + v["title"]).strip()[:100] or v["id"]
+        items = self._search(validate.clean_query(q), self._routes.current())
+        return {"items": [x for x in items if x.get("id") != v["id"]][:16]}
+
+    @safe
+    def fullscreen(self, on=None):
+        if self._window is None:
+            raise ValueError("Нет окна")
+        self._window.toggle_fullscreen()
+        return {}
+
+    @safe
+    def play_external(self, item, quality=None):
+        self.stop_watch()
+        return self.play(item, quality)
+
+    # --- помощница ---
+    def _active_ai(self):
+        cfg = next((c for c in self._store.value.ai_configs if c.get("active")), None)
+        if cfg is None:
+            cfg = next((c for c in self._store.value.ai_configs), None)
+        if cfg is None:
+            raise ValueError("Нет конфигурации ИИ. Добавьте её в Настройки → ИИ — API и сделайте активной.")
+        return cfg
+
+    @safe
+    def assistant_send(self, text, context=None):
+        from .ai.providers import chat_stream
+
+        msg = ai_assistant.clean_message(text)
+        ctx = ai_assistant.clean_context(context)
+        cfg = self._active_ai()
+        aid = self._store.value.assistant
+        api_key = self._store.ai_api_key(cfg["id"])
+        system = ai_assistant.system_prompt(aid, ctx, can_account=self._accounts.status()["google"]["signed_in"])
+        self._db.chat_add(aid, "user", msg)
+        history = ai_assistant.trim_history(self._db.chat_history(aid), int(cfg.get("context") or 8000), system)
+        route = self._routes.current()
+        ids = {i["id"] for i in ctx["items"]}
+
+        def gen():
+            return chat_stream(cfg, api_key, system, history, route)
+
+        def done(full, error):
+            clean, actions = ai_assistant.parse_actions(full, ids)
+            if full:
+                self._db.chat_add(aid, "assistant", full)
+            return actions
+
+        jid = self._jobs.start(gen, done)
+        return {"job": jid, "model": cfg.get("model") or "", "config": cfg.get("name") or ""}
+
+    @safe
+    def assistant_poll(self, job):
+        out = self._jobs.poll(_int(job))
+        text, actions = ai_assistant.parse_actions(out["text"]) if out["done"] else (
+            ai_assistant.ACTION_RE.sub("", out["text"]), [])
+        return {**out, "text": text, "actions": out["actions"] if out["done"] else actions}
+
+    @safe
+    def assistant_cancel(self, job):
+        self._jobs.cancel(_int(job))
+
+    @safe
+    def assistant_history(self):
+        aid = self._store.value.assistant
+        rows = []
+        for m in self._db.chat_history(aid, 60):
+            text = ai_assistant.parse_actions(m["content"])[0] if m["role"] == "assistant" else m["content"]
+            rows.append({"role": m["role"], "text": text})
+        try:
+            cfg = self._active_ai()
+            ai = {"name": cfg.get("name") or "", "model": cfg.get("model") or ""}
+        except ValueError:
+            ai = None
+        return {"messages": rows, "ai": ai}
+
+    @safe
+    def assistant_clear(self):
+        self._db.chat_clear(self._store.value.assistant)
+
+    # --- аккаунты Google и VK ---
+    @safe
     def account_status(self):
-        return {"google": False, "vk": False, "note": "Вход в Google и VK — второй этап"}
+        st = self._accounts.status()
+        return {"accounts": st}
+
+    @safe
+    def account_login(self, kind):
+        kind = validate.clean_choice(kind, acc_mod.KINDS, "аккаунт")
+        if self._window is None:
+            raise ValueError("Вход доступен только в окне программы")
+        self._accounts.start_login(kind)
+        return {"accounts": self._accounts.status()}
+
+    @safe
+    def account_logout(self, kind):
+        kind = validate.clean_choice(kind, acc_mod.KINDS, "аккаунт")
+        self._accounts.logout(kind)
+        return {"accounts": self._accounts.status()}
+
+    @safe
+    def account_import(self, kind):
+        kind = validate.clean_choice(kind, acc_mod.KINDS, "аккаунт")
+        p = self._dialog(False, ("cookies.txt (*.txt)", "Все файлы (*.*)"))
+        if p is None:
+            return {"cancelled": True}
+        if p.stat().st_size > 2 * 1024 * 1024:
+            raise ValueError("Файл слишком большой для cookies.txt")
+        n = self._accounts.import_text(kind, p.read_text(encoding="utf-8", errors="replace"))
+        return {"count": n, "accounts": self._accounts.status()}
+
+    @safe
+    def account_profile(self):
+        """Имя и аватар Google (по возможности)."""
+        if not self._accounts.status()["google"]["signed_in"]:
+            return {"profile": {}}
+        info = acc_mod.google_profile(self._accounts, self._routes.current())
+        return {"profile": {"name": validate.clean_text(info.get("name"), 80),
+                            "avatar": info.get("avatar") if validate.is_thumb_url(info.get("avatar")) else ""}}
+
+    @safe
+    def account_feed(self, kind, arg=None):
+        """Подписки, история, смотреть позже, понравившиеся и плейлисты из аккаунта Google (через yt-dlp)."""
+        if not self._accounts.status()["google"]["signed_in"]:
+            raise ValueError("Сначала войдите в Google (Настройки → Аккаунты)")
+        return yt.account_feed(str(kind), arg, self._routes.current())
 
     def _shutdown(self) -> None:
         self._player.stop()
+        if self._media is not None:
+            try:
+                self._media.close()
+            except Exception:
+                pass
 
     @safe
     def save_ai_config(self, payload):
@@ -298,9 +523,7 @@ class Api:
             base_url = base_url or existing["base_url"]
             if not api_key:
                 api_key = self._store.ai_api_key(cfg_id)
-        if not api_key:
-            raise ValueError("Введите API-ключ")
-        api_key = clean_api_key(api_key)
+        api_key = clean_api_key(api_key)  # пустой ключ допустим: локальные серверы (LM Studio, Ollama)
         base_url = clean_base_url(base_url)
         return check_connection(base_url, api_key, self._routes.current())
 

@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS subscriptions(channel_id TEXT PRIMARY KEY, title TEXT
 CREATE TABLE IF NOT EXISTS downloads(
   id INTEGER PRIMARY KEY, source TEXT NOT NULL, vid TEXT NOT NULL, quality TEXT NOT NULL,
   status TEXT NOT NULL, progress REAL DEFAULT 0, path TEXT, error TEXT, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS chat(
+  id INTEGER PRIMARY KEY, assistant TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, t REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS chat_by_assistant ON chat(assistant, id);
 """
 SCHEMA_VERSION = "1"
 HISTORY_LIMIT = 5000
@@ -93,6 +96,24 @@ class Store:
             except BaseException:
                 self._db.execute("ROLLBACK")
                 raise
+
+    # --- чат с помощницей ---
+    def chat_add(self, assistant: str, role: str, content: str) -> None:
+        if role not in ("user", "assistant") or not content:
+            return
+        self._x("INSERT INTO chat(assistant,role,content,t) VALUES(?,?,?,?)",
+                (assistant[:16], role, content[:20000], time.time()))
+        self._x("DELETE FROM chat WHERE assistant=? AND id NOT IN "
+                "(SELECT id FROM chat WHERE assistant=? ORDER BY id DESC LIMIT 400)", (assistant[:16], assistant[:16]))
+
+    def chat_history(self, assistant: str, limit: int = 200) -> list[dict]:
+        rows = self._q("SELECT role, content FROM chat WHERE assistant=? ORDER BY id DESC LIMIT ?",
+                       (assistant[:16], int(limit)))
+        rows.reverse()
+        return rows
+
+    def chat_clear(self, assistant: str) -> None:
+        self._x("DELETE FROM chat WHERE assistant=?", (assistant[:16],))
 
     # --- видео ---
     def upsert_video(self, item: dict) -> dict:

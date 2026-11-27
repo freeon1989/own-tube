@@ -10,7 +10,7 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 VK_ID_RE = re.compile(r"^-?\d{1,12}_\d{1,12}$")
 CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 SOURCES = ("yt", "vk")
-QUALITIES = ("best", "1080", "720")
+QUALITIES = ("best", "1080", "720", "480", "360")
 CODECS = ("auto", "h264")
 THEMES = ("assistant", "violet", "light", "neon", "sakura", "minimal")
 SB_CATEGORIES = ("sponsor", "selfpromo", "interaction", "intro", "outro", "preview", "music_offtopic", "filler")
@@ -24,7 +24,7 @@ STREAM_HOSTS = {
     "vk": (".okcdn.ru", ".vkuser.net", ".vk.com", ".vkvideo.ru", ".userapi.com", ".mycdn.me", ".vk-cdn.net"),
 }
 # Хосты картинок (совпадает с CSP в index.html)
-THUMB_HOSTS = ("i.ytimg.com",) + tuple(h.lstrip(".") for h in (".userapi.com", ".okcdn.ru", ".mycdn.me", ".vkuser.net"))
+THUMB_HOSTS = ("i.ytimg.com", "yt3.ggpht.com", "yt3.googleusercontent.com", "lh3.googleusercontent.com") + tuple(h.lstrip(".") for h in (".userapi.com", ".okcdn.ru", ".mycdn.me", ".vkuser.net"))
 VK_PAGE_HOSTS = ("vk.com", "vkvideo.ru", "m.vk.com", "m.vkvideo.ru", "www.vk.com", "www.vkvideo.ru", "vk.ru", "www.vk.ru")
 
 

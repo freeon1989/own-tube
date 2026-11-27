@@ -20,7 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--debug", action="store_true", help="включить инструменты разработчика")
     parser.add_argument("--version", action="version", version=f"own-tube {__version__}")
     parser.add_argument("--selftest", metavar="FILE", help="проверить поиск, потоки и программы без окна; отчёт в FILE")
+    parser.add_argument("--login", choices=("google", "vk"), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.login:
+        from .login_window import run as login_run
+        return login_run(args.login)
     if args.selftest:
         from .selftest import run
         return run(args.selftest)

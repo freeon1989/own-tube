@@ -248,5 +248,10 @@ class SecretStore:
         except Exception:
             pass
 
+    def reload(self, name: str) -> None:
+        """Перечитать секрет с диска (его мог записать другой процесс — окно входа)."""
+        self._loaded.discard(name)
+        self._memory.pop(name, None)
+
     def has(self, name: str = PROXY_KEY) -> bool:
         return bool(self.get(name))

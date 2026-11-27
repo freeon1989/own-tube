@@ -2,6 +2,7 @@
 """YouTube: поиск, разделы «Обзор», Shorts и лента подписок. Через yt-dlp и RSS, без входа в аккаунт."""
 from __future__ import annotations
 
+import re
 import logging
 import time
 import xml.etree.ElementTree as ET
@@ -80,10 +81,9 @@ def normalize(entries) -> list[dict]:
 
 
 def _flat(url: str, route: Route, limit: int) -> list[dict]:
-    import yt_dlp
 
     opts = ytdl.base_options(route, extract_flat=True, playlistend=limit, noplaylist=False)
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with ytdl.YDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return normalize((info or {}).get("entries"))
 
@@ -194,3 +194,40 @@ def subscriptions_feed(channels, route: Route, per_channel: int = 4, limit: int 
             items.extend(chunk)
     items.sort(key=lambda i: i.get("published", 0), reverse=True)
     return items[:limit]
+
+
+# ---------- ленты аккаунта Google (нужны cookies входа) ----------
+ACCOUNT_FEEDS = {
+    "subs": "https://www.youtube.com/feed/subscriptions",
+    "history": "https://www.youtube.com/feed/history",
+    "later": "https://www.youtube.com/playlist?list=WL",
+    "liked": "https://www.youtube.com/playlist?list=LL",
+    "recommended": "https://www.youtube.com/",
+}
+PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{2,64}$")
+
+
+def account_feed(kind: str, arg, route: Route, limit: int = 60) -> dict:
+    if kind in ACCOUNT_FEEDS:
+        return {"items": _flat(ACCOUNT_FEEDS[kind], route, limit)}
+    if kind == "playlist":
+        if not isinstance(arg, str) or not PLAYLIST_ID_RE.fullmatch(arg):
+            raise ValueError("Некорректный плейлист")
+        return {"items": _flat(f"https://www.youtube.com/playlist?list={arg}", route, 200)}
+    if kind == "playlists":
+        opts = ytdl.base_options(route, extract_flat=True, playlistend=100, noplaylist=False)
+        with ytdl.YDL(opts) as ydl:
+            info = ydl.extract_info("https://www.youtube.com/feed/playlists", download=False)
+        out = []
+        for e in (info or {}).get("entries") or []:
+            if not isinstance(e, dict):
+                continue
+            pid = e.get("id")
+            if isinstance(pid, str) and PLAYLIST_ID_RE.fullmatch(pid):
+                thumbs = e.get("thumbnails") or []
+                thumb = next((t.get("url") for t in reversed(thumbs) if isinstance(t, dict)
+                              and validate.is_thumb_url(t.get("url"))), "")
+                out.append({"id": pid, "title": validate.clean_text(e.get("title"), 200) or "Плейлист",
+                            "count": e.get("playlist_count") or "", "thumb": thumb})
+        return {"playlists": out}
+    raise ValueError("Неизвестная лента аккаунта")

@@ -2,7 +2,7 @@
 <html lang="ru" data-theme="violet">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: https://i.ytimg.com https://*.userapi.com https://*.okcdn.ru https://*.mycdn.me https://*.vkuser.net; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: http://127.0.0.1:*; media-src http://127.0.0.1:*; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>own-tube</title>
 <link rel="icon" href="data:,">
@@ -70,6 +70,7 @@
         <button type="button" role="radio" data-q="best" aria-checked="true">Лучшее</button>
         <button type="button" role="radio" data-q="1080" aria-checked="false">1080p</button>
         <button type="button" role="radio" data-q="720" aria-checked="false">720p</button>
+        <button type="button" role="radio" data-q="480" aria-checked="false">480p</button>
       </div>
       <button class="chip-btn" id="routeChip" type="button" title="Сеть: прокси и VPN"><span class="dot" id="routeDot"></span><svg class="ico"><use href="#i-globe"/></svg><span id="routeText">Напрямую</span></button>
     </header>
@@ -93,14 +94,16 @@
 <section class="chat closed" id="chat" aria-label="Чат с помощницей">
   <header class="chat-head">
     <img id="chatAv" class="av" src="assets/heroines/rei.webp" alt="">
-    <div class="ch-who"><b id="chName">Рэй</b><span>ИИ — второй этап</span></div>
+    <div class="ch-who"><b id="chName">Рэй</b><span id="chSub">ИИ</span></div>
+    <button class="icon-btn sm" id="chatStop" type="button" aria-label="Остановить ответ" title="Остановить ответ" hidden>■</button>
+    <button class="icon-btn sm" id="chatClear" type="button" aria-label="Очистить переписку" title="Очистить переписку"><svg class="ico"><use href="#i-trash"/></svg></button>
     <button class="icon-btn sm" id="chatClose" type="button" aria-label="Свернуть чат"><svg class="ico"><use href="#i-close"/></svg></button>
   </header>
   <div class="msgs" id="msgs" aria-live="polite"></div>
   <form class="composer" id="chatForm">
-    <button class="icon-btn" type="button" disabled aria-label="Микрофон (второй этап)" title="Микрофон — второй этап"><svg class="ico"><use href="#i-mic"/></svg></button>
+    <button class="icon-btn" type="button" disabled aria-label="Микрофон (позже)" title="Голос — в следующих версиях"><svg class="ico"><use href="#i-mic"/></svg></button>
     <label class="sr" for="chatIn">Сообщение</label>
-    <input id="chatIn" type="text" placeholder="Написать помощнице…" autocomplete="off" maxlength="200">
+    <input id="chatIn" type="text" placeholder="Написать помощнице…" autocomplete="off" maxlength="4000">
     <button class="go sq" type="submit" aria-label="Отправить"><svg class="ico"><use href="#i-send"/></svg></button>
   </form>
 </section>

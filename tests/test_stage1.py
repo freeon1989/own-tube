@@ -162,7 +162,7 @@ def test_settings_strict(tmp_path):
             st.update(bad)
 
 
-def test_api_library_and_assistant_stub(tmp_path):
+def test_api_library_and_assistant_needs_config(tmp_path):
     api = Api(store=SettingsStore(tmp_path), start_downloader=False)
     assert api.set_mark("favorite", YT, True)["ok"]
     assert api.library("favorite")["items"][0]["id"] == YT["id"]
@@ -170,7 +170,8 @@ def test_api_library_and_assistant_stub(tmp_path):
     assert api.create_playlist("P", YT)["ok"]
     assert api.library("nope")["ok"] is False
     assert api.library("playlist", "1; DROP")["ok"] is False
-    assert "второй этап" in api.assistant_say("привет")["reply"].lower() or api.assistant_say("x")["ok"]
+    r = api.assistant_send("привет")
+    assert r["ok"] is False and "ИИ" in r["error"]  # без конфигурации ИИ — понятная ошибка в чате
     assert api.import_takeout()["ok"] is False  # без окна диалога нет — и пути из интерфейса не принимаются
 
 

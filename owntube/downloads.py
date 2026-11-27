@@ -62,7 +62,6 @@ class Downloader:
                 self._cancel.discard(dl_id)
 
     def _run(self, dl_id: int) -> None:
-        import yt_dlp
 
         row = self._store.get_download(dl_id)
         if not row or row["status"] != "queued" or dl_id in self._cancel:
@@ -97,7 +96,7 @@ class Downloader:
         if ffmpeg:
             opts["ffmpeg_location"] = ffmpeg
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with ytdl.YDL(opts) as ydl:
                 info = ydl.extract_info(validate.item_url(row["source"], row["vid"]), download=True)
             path = ""
             for r in (info or {}).get("requested_downloads") or []:

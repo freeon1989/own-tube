@@ -139,7 +139,7 @@ def http_connect(proxy: str, host: str, port: int, timeout: float = 15,
         raise
 
 
-def host_allowed(host: str, port: int) -> bool:
+def host_allowed(host: str, port: int, suffixes=None) -> bool:
     if port not in ALLOWED_PORTS or not host or len(host) > 253:
         return False
     try:
@@ -147,7 +147,7 @@ def host_allowed(host: str, port: int) -> bool:
         return False  # только имена хостов CDN, не голые адреса
     except ValueError:
         pass
-    return validate.host_matches(host.lower().rstrip("."), ALLOWED_SUFFIXES)
+    return validate.host_matches(host.lower().rstrip("."), suffixes or ALLOWED_SUFFIXES)
 
 
 def _pipe(a: socket.socket, b: socket.socket) -> None:
@@ -173,8 +173,9 @@ def _pipe(a: socket.socket, b: socket.socket) -> None:
 
 
 class Bridge:
-    def __init__(self, upstream: str, user: str = "", password: str = ""):
+    def __init__(self, upstream: str, user: str = "", password: str = "", allowed=None):
         self.upstream = upstream
+        self._allowed = tuple(allowed) if allowed else ALLOWED_SUFFIXES
         self._user = user
         self._password = password
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -236,7 +237,7 @@ class Bridge:
             host, _, port_s = parts[1].rpartition(":")
             host = host.strip("[]")
             port = int(port_s) if port_s.isdigit() else 0
-            if not host_allowed(host, port):
+            if not host_allowed(host, port, self._allowed):
                 log.warning("Мост: отказ для %s:%s", host, port)
                 client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                 client.close()
