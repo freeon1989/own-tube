@@ -30,7 +30,7 @@ from shoot_022 import wait_js  # noqa: E402
 from test_030 import conf_from  # noqa: E402
 from test_update import FakeGitHub  # noqa: E402
 
-NOTES = """## Что нового в 0.3.1
+NOTES = """## Что нового в 0.9.0
 - Несколько профилей встроенного VPN
 - Быстрее открываются каналы
 - Исправлена подгрузка Shorts при медленной сети"""
@@ -45,7 +45,7 @@ def main() -> None:
     store.update({"download_dir": str(home / "dl")})
     server = subprocess.Popen([helper, "-test-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     info = json.loads(server.stdout.readline())
-    gh = FakeGitHub(version="0.3.1")
+    gh = FakeGitHub(version="0.9.0")
     gh_base = f"http://127.0.0.1:{gh.port}"
     updater.API_LATEST, updater.PAGE_LATEST = gh_base + "/api/latest", gh_base + "/page/latest"
     real = updater._check_url
@@ -54,9 +54,9 @@ def main() -> None:
 
     def do_get(self):  # описание релиза как у настоящего
         if self.path == "/api/latest":
-            body = {"tag_name": "v0.3.1", "body": NOTES, "html_url": "https://github.com/freeon1989/own-tube/releases/tag/v0.3.1",
+            body = {"tag_name": "v0.9.0", "body": NOTES, "html_url": "https://github.com/freeon1989/own-tube/releases/tag/v0.9.0",
                     "published_at": "2026-12-05T12:00:00Z",
-                    "assets": [{"name": n, "browser_download_url": f"{gh_base}/download/v0.3.1/{n}"} for n in (updater.ASSET, updater.ASSET + ".sha256")]}
+                    "assets": [{"name": n, "browser_download_url": f"{gh_base}/download/v0.9.0/{n}"} for n in (updater.ASSET, updater.ASSET + ".sha256")]}
             return self.send(200, json.dumps(body, ensure_ascii=False).encode())
         return orig(self)
     gh.srv.RequestHandlerClass.do_GET = do_get
@@ -96,7 +96,7 @@ def main() -> None:
         checks["banner"] = wait_js(pg, "!!document.querySelector('.upd-banner')", 15) and pg.inner_text(".upd-banner")
         pg.click(".upd-banner button:has-text('Подробнее')")
         pg.click("#set-about button:has-text('Проверить обновления')")
-        checks["update_shown"] = wait_js(pg, "document.querySelector('#set-about').textContent.includes('Доступна own-tube 0.3.1')", 15)
+        checks["update_shown"] = wait_js(pg, "document.querySelector('#set-about').textContent.includes('Доступна own-tube 0.9.0')", 15)
         pg.evaluate("document.getElementById('set-about').scrollIntoView({block: 'start'})")
         pg.wait_for_timeout(300)
         pg.screenshot(path=str(out / "update.png"))

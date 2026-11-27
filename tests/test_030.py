@@ -161,10 +161,17 @@ def helper_exe(tmp_path_factory):
     return str(out)
 
 
+CONF_NAMES = {"header_protection_key": "HeaderProtectionKey", "rekey_after_time": "RekeyAfterTime",
+              "rekey_timeout": "RekeyTimeout", "reject_after_time": "RejectAfterTime",
+              "keepalive_timeout": "KeepaliveTimeout", "max_handshake_attempts": "MaxHandshakeAttempts",
+              "random_trailers": "RandomTrailers", "disable_cookies": "DisableCookies",
+              "content_padding_addition": "ContentPaddingAddition"}
+
+
 def conf_from(c: dict) -> str:
     lines = ["[Interface]", f"PrivateKey = {c['private_key']}", "Address = " + ", ".join(c["addresses"]),
              "DNS = " + ", ".join(c["dns"]), f"MTU = {c['mtu']}"]
-    lines += [f"{k.upper()} = {v}" for k, v in sorted(c["obf"].items())]
+    lines += [f"{CONF_NAMES.get(k, k.upper())} = {v}" for k, v in sorted(c["obf"].items())]
     for p in c["peers"]:
         lines += ["[Peer]", f"PublicKey = {p['public_key']}", f"Endpoint = {p['endpoint']}",
                   "AllowedIPs = " + ", ".join(p["allowed_ips"]), f"PersistentKeepalive = {p['keepalive']}"]
@@ -184,7 +191,7 @@ def test_app_traffic_goes_through_embedded_tunnel(tmp_path, helper_exe, test_ser
     api = _api(tmp_path)
     api._awg._find = lambda: helper_exe
     res = api.vpn_import_text(conf_from(test_server["client"]))
-    assert res["ok"] and res["config"]["kind"] == "AmneziaWG 2.0"
+    assert res["ok"] and res["config"]["kind"] == "AmneziaWG 3.1"
     r = api.vpn_enable(True)
     assert r["ok"] and r["status"]["running"], r
     route = api._routes.current()

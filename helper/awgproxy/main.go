@@ -34,30 +34,58 @@ import (
 	"owntube/awgproxy/netstack"
 )
 
-const version = "awgproxy 1.0 (amneziawg-go v3.1.20261116)"
+const version = "awgproxy 1.1 (amneziawg-go v3.1.20261116)"
 
 type Peer struct {
 	PublicKey    string   `json:"public_key"`
 	PresharedKey string   `json:"preshared_key"`
 	Endpoint     string   `json:"endpoint"`
 	AllowedIPs   []string `json:"allowed_ips"`
-	Keepalive    int      `json:"keepalive"`
+	Keepalive    Flex     `json:"keepalive"` // число или диапазон «от-до» (AmneziaWG 3.x)
 }
+
+// Flex принимает и число (25), и строку ("25-35") из JSON; пустое и "0" — выключено.
+type Flex string
+
+func (f *Flex) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case nil:
+		*f = ""
+	case float64:
+		*f = Flex(strconv.FormatInt(int64(x), 10))
+	case string:
+		*f = Flex(strings.TrimSpace(x))
+	default:
+		return errors.New("keepalive: нужно число или диапазон")
+	}
+	return nil
+}
+
+func (f Flex) on() bool { return f != "" && f != "0" && f != "0-0" }
 
 type Config struct {
 	PrivateKey string            `json:"private_key"`
 	Addresses  []string          `json:"addresses"`
 	DNS        []string          `json:"dns"`
 	MTU        int               `json:"mtu"`
-	Obf        map[string]string `json:"obf"` // jc, jmin, jmax, s1..s4, h1..h4, i1..i5
+	Obf        map[string]string `json:"obf"` // см. obfKeys
 	Peers      []Peer            `json:"peers"`
 	User       string            `json:"user"`
 	Pass       string            `json:"pass"`
 	ListenPort int               `json:"listen_port"` // только для тестового сервера
 }
 
+// Все параметры устройства amneziawg-go v3.1, которые приложение передаёт без изменений (формат UAPI).
+// Неизвестный ключ — ошибка, а не тихий пропуск: потерянный HeaderProtectionKey или S3/S4 дал бы туннель без рукопожатия.
 var obfKeys = map[string]bool{"jc": true, "jmin": true, "jmax": true, "s1": true, "s2": true, "s3": true, "s4": true,
-	"h1": true, "h2": true, "h3": true, "h4": true, "i1": true, "i2": true, "i3": true, "i4": true, "i5": true}
+	"h1": true, "h2": true, "h3": true, "h4": true, "i1": true, "i2": true, "i3": true, "i4": true, "i5": true,
+	"header_protection_key": true, "content_padding_addition": true,
+	"rekey_after_time": true, "rekey_timeout": true, "reject_after_time": true, "keepalive_timeout": true,
+	"max_handshake_attempts": true, "random_trailers": true, "disable_cookies": true}
 
 func keyHex(b64 string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
@@ -108,11 +136,21 @@ func uapi(c *Config, server bool) (string, error) {
 	sort.Strings(names)
 	for _, n := range names {
 		if !obfKeys[n] {
-			continue
+			return "", fmt.Errorf("параметр %q не поддерживается", n)
 		}
 		v := strings.TrimSpace(c.Obf[n])
-		if v == "" || strings.ContainsAny(v, "\n\r") {
+		if v == "" {
 			continue
+		}
+		if strings.ContainsAny(v, "\n\r") {
+			return "", fmt.Errorf("параметр %q: недопустимое значение", n)
+		}
+		if n == "header_protection_key" {
+			hk, err := keyHex(v)
+			if err != nil {
+				return "", errors.New("HeaderProtectionKey: нужен ключ из 32 байт (base64)")
+			}
+			v = hk
 		}
 		fmt.Fprintf(&b, "%s=%s\n", n, v)
 	}
@@ -137,8 +175,8 @@ func uapi(c *Config, server bool) (string, error) {
 			}
 			fmt.Fprintf(&b, "endpoint=%s\n", ep)
 		}
-		if p.Keepalive > 0 {
-			fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", p.Keepalive)
+		if p.Keepalive.on() {
+			fmt.Fprintf(&b, "persistent_keepalive_interval=%s\n", p.Keepalive)
 		}
 		b.WriteString("replace_allowed_ips=true\n")
 		for _, a := range p.AllowedIPs {

@@ -1,5 +1,5 @@
 "use strict";
-/* own-tube 0.3.1. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
+/* own-tube 0.3.2. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
 (function () {
   const NS = "http://www.w3.org/2000/svg";
   const $ = (id) => document.getElementById(id);
@@ -1103,7 +1103,7 @@
     const info = h("div", { class: "vpn-info", id: "vpnInfo" });
     const stat = h("p", { class: "note vpn-stat", id: "vpnStat" });
     const input = h("textarea", { class: "vpn-input", rows: "3", placeholder: "Вставьте ссылку vpn://… из AmneziaVPN или текст конфигурации AmneziaWG ([Interface] … [Peer] …)",
-      "aria-label": "Ссылка или конфигурация AmneziaWG", spellcheck: "false", autocomplete: "off" });
+      "aria-label": "Ссылка или конфигурация AmneziaWG (скрыта при вводе)", spellcheck: "false", autocomplete: "off" });
     let state = null;
     const modeSeg = h("div", { class: "seg", role: "radiogroup", "aria-label": "Как выходить в сеть" });
     function say(text, kind) { msg.textContent = text || ""; msg.className = "note " + (kind === "ok" ? "ok-text" : kind === "bad" ? "bad-text" : ""); }
@@ -1168,7 +1168,8 @@
       field("Как выходить в сеть", modeSeg),
       field("Импорт", input),
       h("div", { class: "row2" },
-        h("button", { class: "go", type: "button", onclick: async () => doImport(await call("vpn_import_text", input.value)) }, "Импортировать"),
+        h("button", { class: "go", type: "button", onclick: async () => { const t = input.value; input.value = ""; const r = await call("vpn_import_text", t); if (!r.ok) input.value = t; doImport(r); } }, "Импортировать"),
+        h("button", { class: "ghost", type: "button", onclick: (e) => { const shown = input.classList.toggle("shown"); e.currentTarget.textContent = shown ? "Скрыть" : "Показать"; } }, "Показать"),
         h("button", { class: "ghost", type: "button", onclick: async () => doImport(await call("vpn_import_file")) }, ic("upload"), " Файл .conf…"),
         h("button", { class: "ghost", type: "button", onclick: () => refresh(true) }, "Обновить состояние")),
       info, stat, msg,

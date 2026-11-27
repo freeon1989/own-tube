@@ -33,9 +33,32 @@ log = logging.getLogger("owntube.awg")
 SECRET_NAME = "awg_config"
 TOOL = "awgproxy"
 DEVICE_INT = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4")
-DEVICE_RANGE = ("h1", "h2", "h3", "h4")
+DEVICE_RANGE = ("h1", "h2", "h3", "h4",
+                # AmneziaWG 3.x: время в секундах, одно число или диапазон «от-до» (клиент выбирает значение сам)
+                "rekey_after_time", "rekey_timeout", "reject_after_time", "keepalive_timeout", "max_handshake_attempts",
+                "content_padding_addition")
 DEVICE_CHAIN = ("i1", "i2", "i3", "i4", "i5")
-OBF_KEYS = DEVICE_INT + DEVICE_RANGE + DEVICE_CHAIN
+DEVICE_BOOL = ("random_trailers", "disable_cookies")
+DEVICE_KEY = ("header_protection_key",)
+OBF_KEYS = DEVICE_INT + DEVICE_RANGE + DEVICE_CHAIN + DEVICE_KEY + DEVICE_BOOL
+RANGE_MAX = {"h1": 0xFFFFFFFF, "h2": 0xFFFFFFFF, "h3": 0xFFFFFFFF, "h4": 0xFFFFFFFF}
+V3_KEYS = DEVICE_RANGE[4:] + DEVICE_KEY + DEVICE_BOOL
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+# имя в .conf / поле в vpn:// (без регистра, без «_» и пробелов) → имя параметра устройства
+OBF_ALIASES = {_norm(k): k for k in OBF_KEYS}
+OBF_ALIASES.update({"junkpacketcount": "jc", "junkpacketminsize": "jmin", "junkpacketmaxsize": "jmax",
+                    "initpacketjunksize": "s1", "responsepacketjunksize": "s2", "cookiereplypacketjunksize": "s3",
+                    "transportpacketjunksize": "s4", "initpacketmagicheader": "h1", "responsepacketmagicheader": "h2",
+                    "underloadpacketmagicheader": "h3", "transportpacketmagicheader": "h4"})
+# ключи, которые не относятся к протоколу туннеля и безопасно не учитываются в приложении
+IFACE_IGNORED = {"privatekey", "address", "dns", "mtu", "listenport", "table", "preup", "postup", "predown", "postdown",
+                 "saveconfig", "fwmark", "name"}
+PEER_KEYS = {"publickey", "presharedkey", "endpoint", "allowedips", "persistentkeepalive"}
 _IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b|(?<![\w:])(?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}(?![\w:])"
                     r"|(?<![\w:])(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*)?::(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*)?(?![\w:])")
 _HOST_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
@@ -139,14 +162,22 @@ def _from_block(block: dict, top: dict) -> dict:
              f"DNS = {dns1}, {dns2}"]
     if last.get("mtu"):
         lines.append(f"MTU = {last.get('mtu')}")
-    for k in OBF_KEYS:
-        v = last.get(k.upper(), block.get(k.upper()))
-        if v not in (None, ""):
-            lines.append(f"{k.upper()} = {v}")
+    seen: dict[str, str] = {}
+    for src in (block, last):  # поля последней конфигурации важнее полей контейнера
+        for fk, fv in src.items():
+            name = OBF_ALIASES.get(_norm(fk))
+            if name and isinstance(fv, (str, int)) and not isinstance(fv, bool) and str(fv).strip() != "":
+                seen[name] = str(fv)
+            elif name and isinstance(fv, bool):
+                seen[name] = "true" if fv else "false"
+    for name in OBF_KEYS:
+        if name in seen:
+            lines.append(f"{name} = {seen[name]}")
     lines += ["[Peer]", f"PublicKey = {pub}"]
     if last.get("psk_key"):
         lines.append(f"PresharedKey = {last.get('psk_key')}")
-    lines += [f"Endpoint = {host}:{port}", "AllowedIPs = 0.0.0.0/0, ::/0", "PersistentKeepalive = 25"]
+    ka = next((last[k] for k in ("persistent_keep_alive", "persistent_keepalive", "PersistentKeepalive") if last.get(k) not in (None, "")), 25)
+    lines += [f"Endpoint = {host}:{port}", "AllowedIPs = 0.0.0.0/0, ::/0", f"PersistentKeepalive = {ka}"]
     return parse_conf("\n".join(lines))
 
 
@@ -157,6 +188,7 @@ def _clean_name(v) -> str:
 
 def parse_conf(text: str) -> dict:
     iface: dict[str, str] = {}
+    shown: dict[str, str] = {}  # нормализованное имя → как написано в конфигурации (для сообщения об ошибке)
     peers: list[dict[str, str]] = []
     section = None
     for raw in text.splitlines():
@@ -171,10 +203,13 @@ def parse_conf(text: str) -> dict:
         if "=" not in line:
             continue
         k, v = line.split("=", 1)
-        k, v = k.strip().lower(), v.strip()
+        shown.setdefault(_norm(k), k.strip())
+        k, v = _norm(k), v.strip()
         if section == "interface":
             iface[k] = (iface[k] + "," + v) if k in ("address", "dns") and k in iface else v
         elif section == "peer" and peers:
+            if k not in PEER_KEYS:
+                raise AwgConfigError(f"Параметр пира «{_safe_name(shown.get(k, k))}» не поддерживается этой версией встроенного VPN")
             peers[-1][k] = (peers[-1][k] + "," + v) if k == "allowedips" and k in peers[-1] else v
     if not iface:
         raise AwgConfigError("В конфигурации нет секции [Interface]")
@@ -189,9 +224,15 @@ def parse_conf(text: str) -> dict:
         "obf": {},
         "peers": [],
     }
-    for k in OBF_KEYS:
-        if k in iface and iface[k] != "":
-            cfg["obf"][k] = _obf(k, iface[k])
+    for raw_key, val in iface.items():
+        if raw_key in IFACE_IGNORED:
+            continue
+        name = OBF_ALIASES.get(raw_key)
+        if name is None:
+            raise AwgConfigError(f"Параметр «{_safe_name(shown.get(raw_key, raw_key))}» не поддерживается этой версией встроенного VPN")
+        if val != "":
+            cfg["obf"][name] = _obf(name, val)
+    cfg["obf"] = {k: cfg["obf"][k] for k in OBF_KEYS if k in cfg["obf"]}
     if "jmin" in cfg["obf"] and "jmax" in cfg["obf"] and int(cfg["obf"]["jmin"]) > int(cfg["obf"]["jmax"]):
         raise AwgConfigError("Jmin больше Jmax")
     for p in peers:
@@ -200,12 +241,42 @@ def parse_conf(text: str) -> dict:
             "preshared_key": _key(p.get("presharedkey"), "PresharedKey") if p.get("presharedkey") else "",
             "endpoint": _endpoint(p.get("endpoint", "")),
             "allowed_ips": _prefixes(p.get("allowedips", "0.0.0.0/0")),
-            "keepalive": _int(p.get("persistentkeepalive") or "25", "PersistentKeepalive", 0, 3600),
+            "keepalive": _keepalive(p.get("persistentkeepalive") or "25"),
         }
         cfg["peers"].append(peer)
     if not any(p["endpoint"] for p in cfg["peers"]):
         raise AwgConfigError("В конфигурации нет Endpoint (адреса сервера)")
     return cfg
+
+
+def _safe_name(k: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "", str(k))[:40] or "?"
+
+
+def _range(v: str, what: str, hi: int) -> tuple[int, int]:
+    m = re.match(r"^(\d{1,10})(?:\s*-\s*(\d{1,10}))?$", v.strip())
+    if not m:
+        raise AwgConfigError(f"{what}: нужно число или диапазон «от-до»")
+    a = int(m.group(1))
+    b = int(m.group(2)) if m.group(2) else a
+    if b < a or b > hi:
+        raise AwgConfigError(f"{what}: неверный диапазон")
+    return a, b
+
+
+def _keepalive(v):
+    """PersistentKeepalive: число или диапазон «от-до» (AmneziaWG 3.x). Число остаётся числом."""
+    a, b = _range(str(v), "PersistentKeepalive", 3600)
+    return a if str(v).strip().isdigit() else f"{a}-{b}"
+
+
+def _bool(v: str, what: str) -> str:
+    t = v.strip().lower()
+    if t in ("on", "true", "yes", "1"):
+        return "true"
+    if t in ("off", "false", "no", "0"):
+        return "false"
+    raise AwgConfigError(f"{what}: нужно on/off")
 
 
 def _key(v, what: str) -> str:
@@ -287,18 +358,23 @@ def _endpoint(v: str) -> str:
 
 def _obf(k: str, v: str) -> str:
     v = v.strip()
-    what = k.upper()
+    what = "".join(w.capitalize() for w in k.split("_")) if "_" in k else k.upper()
     if k in DEVICE_INT:
         return str(_int(v, what, 0, 65535))
     if k in DEVICE_RANGE:
-        m = re.match(r"^(\d{1,10})(?:\s*-\s*(\d{1,10}))?$", v)
-        if not m:
-            raise AwgConfigError(f"{what}: нужно число или диапазон «от-до»")
-        a = int(m.group(1))
-        b = int(m.group(2)) if m.group(2) else a
-        if b < a or b > 0xFFFFFFFF:
-            raise AwgConfigError(f"{what}: неверный диапазон")
-        return f"{a}-{b}" if m.group(2) else str(a)
+        a, b = _range(v, what, RANGE_MAX.get(k, 0xFFFFFFFF))
+        return f"{a}-{b}" if "-" in v else str(a)
+    if k in DEVICE_BOOL:
+        return _bool(v, what)
+    if k in DEVICE_KEY:
+        t = re.sub(r"\s+", "", v)
+        try:
+            raw = bytes.fromhex(t) if re.fullmatch(r"[0-9a-fA-F]{64}", t) else base64.b64decode(t, validate=True)
+        except (binascii.Error, ValueError):
+            raw = b""
+        if len(raw) != 32:
+            raise AwgConfigError(f"{what}: нужен ключ из 32 байт (base64)")
+        return base64.b64encode(raw).decode()
     if len(v) > 8192 or not v.startswith("<") or any(not ch.isprintable() for ch in v):
         raise AwgConfigError(f"{what}: неверная цепочка (ожидается вида <b 0x...><r 16>)")
     return v
@@ -307,7 +383,9 @@ def _obf(k: str, v: str) -> str:
 def summary(cfg: dict) -> dict:
     """Что показать в интерфейсе: без ключей и без полного адреса сервера."""
     obf = cfg.get("obf") or {}
-    if any(k in obf for k in ("s3", "s4")) or any("-" in obf.get(k, "") for k in DEVICE_RANGE):
+    if any(k in obf for k in V3_KEYS):
+        kind = "AmneziaWG 3.1"
+    elif any(k in obf for k in ("s3", "s4")) or any("-" in obf.get(k, "") for k in DEVICE_RANGE[:4]):
         kind = "AmneziaWG 2.0"
     elif any(k in obf for k in DEVICE_CHAIN):
         kind = "AmneziaWG 1.5"

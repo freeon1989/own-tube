@@ -10,16 +10,16 @@
 
 [~170 МБ, zip](https://github.com/freeon1989/own-tube/releases/latest/download/own-tube-win-x64.zip) · [страница релизов](https://github.com/freeon1989/own-tube/releases)
 
-Текущая версия: **0.3.1**. Нужны **Windows 10 или 11 (x64)** и [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (в Windows 11 и в большинстве установок Windows 10 он уже есть).
+Текущая версия: **0.3.2**. Нужны **Windows 10 или 11 (x64)** и [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (в Windows 11 и в большинстве установок Windows 10 он уже есть).
 
 Распакуйте архив и запустите `own-tube.exe`. Windows SmartScreen может показать предупреждение: сборка не подписана цифровым сертификатом. Нажмите «Подробнее» → «Выполнить в любом случае».
 
 Все данные остаются на этом компьютере, в папке `%APPDATA%\own-tube`. Телеметрии нет. Обновление — из релизов GitHub и только по кнопке «Обновить» (Настройки → О программе).
 
-SHA-256 (файлы `own-tube-win-x64.zip` и `own-tube-0.3.1-win-x64.zip` совпадают):
+SHA-256 (файлы `own-tube-win-x64.zip` и `own-tube-0.3.2-win-x64.zip` совпадают):
 
 ```
-b20e61ac22ad914592ca58aa503ee6adb0271c326befebee0542778c9d674e8e
+59cf8c38f19d1ab6634544e1e002c8c8f84f1321ed0d02abb9e27e4dc436996a
 ```
 
 ## Скриншоты
@@ -68,7 +68,7 @@ Shorts, которые можно листать дальше:
 - **Shorts**: вертикальный плеер (колесо, стрелки, свайп), бесконечная лента.
 - **Помощницы** (Рэй, Юки, Кейт, Лила, Нина): чат через активную конфигурацию «ИИ — API» (OpenAI-совместимые серверы, Anthropic Claude, Google Gemini). Поиск, запуск видео и переход в раздел выполняются сразу; лайки, подписки, комментарии и удаление — только с подтверждением.
 - **Голос**: озвучка ответов и ввод с микрофона (через API или локальный whisper.cpp).
-- **Встроенный VPN AmneziaWG** только для этого приложения: та же ссылка `vpn://` из AmneziaVPN или файл `.conf`, без прав администратора и без отдельного клиента. AmneziaWG 1.0/1.5/2.0 и WireGuard, DNS через туннель, ключи только в DPAPI.
+- **Встроенный VPN AmneziaWG** только для этого приложения: та же ссылка `vpn://` из AmneziaVPN или файл `.conf`, без прав администратора и без отдельного клиента. AmneziaWG 1.0/1.5/2.0/3.1 и WireGuard, DNS через туннель, ключи только в DPAPI.
 - **Обновление из GitHub**: проверка при запуске (отключается), список изменений, установка по кнопке с проверкой SHA-256, резервная копия прежней версии и откат.
 - **Прокси SOCKS5/HTTP** для всего трафика приложения (пароль хранится через Windows DPAPI). Кнопка «Проверить связь» показывает каждый шаг, в том числе начало загрузки настоящего видео.
 - **Вход в Google и VK** в отдельном окне с настоящей страницей входа. Пароль программа не видит, cookies шифруются на диске. Запасной путь — импорт `cookies.txt`.
@@ -76,7 +76,12 @@ Shorts, которые можно листать дальше:
 - Несколько тем оформления, в том числе «как у помощницы».
 - Загрузки через yt-dlp и ffmpeg, импорт Google Takeout. Всё хранится локально в SQLite.
 
-## Что нового в 0.3.1
+## Что нового в 0.3.2
+
+- **AmneziaWG 3.1** во встроенном VPN: импорт `.conf` и `vpn://` принимает диапазоны (`PersistentKeepalive = 25-35`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts`), `HeaderProtectionKey`, `RandomTrailers`, `DisableCookies`, `ContentPaddingAddition`, H1–H4 числом или диапазоном. Параметры передаются в amneziawg-go v3.1 как есть; неизвестный параметр — ошибка, а не тихий пропуск. Проверено рукопожатием с тестовым сервером 3.1.
+- Поле импорта скрыто и очищается после успешного импорта.
+
+## Что было в 0.3.1
 
 - Исправлен запуск на Windows после распаковки zip из браузера (ошибка pythonnet «Failed to resolve Python.Runtime.Loader.Initialize»): рядом с exe теперь `own-tube.exe.config`, при старте с файлов в папке программы снимается пометка «из интернета» (`owntube/motw.py`, только внутри папки), при сбое — понятное сообщение. Версии pywebview, pythonnet и clr_loader закреплены в `requirements.txt`. Если не помогло: `Get-ChildItem -Recurse "папка\own-tube" | Unblock-File` в PowerShell.
 

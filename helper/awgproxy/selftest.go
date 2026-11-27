@@ -21,11 +21,15 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// Тестовые параметры обфускации в духе AmneziaWG 1.5/2.0. Только для проверки, не для настоящих серверов.
+// Тестовые параметры в духе AmneziaWG 3.1 (S3/S4, H-диапазоны, HeaderProtectionKey, времена диапазонами, флаги).
+// Только для проверки, не для настоящих серверов; ключ — не секрет (последовательность байт 1..32).
 var testObf = map[string]string{
-	"jc": "4", "jmin": "40", "jmax": "70", "s1": "15", "s2": "18", "s3": "20", "s4": "8",
-	"h1": "1000000-1000100", "h2": "2000000-2000100", "h3": "3000000-3000100", "h4": "4000000-4000100",
-	"i1": "<b 0xc70000000108><r 16><t>",
+	"jc": "4", "jmin": "40", "jmax": "70", "s1": "15", "s2": "18", "s3": "20", "s4": "12",
+	"h1": "1000000-1000100", "h2": "2000000-2000100", "h3": "3000000", "h4": "4000000-4000100",
+	"i1":                    "<b 0xc70000000108><r 16><t>",
+	"header_protection_key": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+	"rekey_after_time":      "100-120", "rekey_timeout": "3-7", "reject_after_time": "150-180",
+	"keepalive_timeout": "5-15", "max_handshake_attempts": "15-20", "random_trailers": "true", "disable_cookies": "true",
 }
 
 const (
@@ -133,7 +137,7 @@ func serveDNS(c net.PacketConn) {
 
 func clientConfig(port int, cPriv, sPub string) *Config {
 	return &Config{PrivateKey: cPriv, Addresses: []string{cliIP + "/32"}, DNS: []string{srvIP}, MTU: 1280, Obf: testObf,
-		Peers: []Peer{{PublicKey: sPub, Endpoint: fmt.Sprintf("127.0.0.1:%d", port), AllowedIPs: []string{"0.0.0.0/0"}, Keepalive: 25}}}
+		Peers: []Peer{{PublicKey: sPub, Endpoint: fmt.Sprintf("127.0.0.1:%d", port), AllowedIPs: []string{"0.0.0.0/0"}, Keepalive: "25-35"}}}
 }
 
 func selftest(benchMB int) int {
