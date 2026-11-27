@@ -1,3 +1,5 @@
+**[Русский](README.md)** · **[English](README.en.md)**
+
 # own-tube
 
 Свой настольный клиент YouTube для Windows. Автор и владелец кода: [freeon1989](https://github.com/freeon1989). Написан с нуля, без заимствований из других клиентов.
