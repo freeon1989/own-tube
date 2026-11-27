@@ -6,3 +6,18 @@ dist/
 *.spec
 .pytest_cache/
 settings.json
+# Большие бинарники и модели: не в репозиторий
+mpv/
+*.exe
+*.dll
+*.zip
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.bin
+models/
+# Локальные данные и секреты
+*.env
+.env*
+secrets*
