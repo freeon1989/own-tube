@@ -285,6 +285,60 @@ def run(path: str) -> int:
             return n
 
     step("sqlite", dbtest)
+
+    def under_wine() -> bool:
+        try:
+            import ctypes
+            return hasattr(ctypes.windll.ntdll, "wine_get_version")
+        except Exception:
+            return False
+
+    def awg_tunnel():
+        exe = find_tool("awgproxy")
+        if not exe:
+            raise FileNotFoundError("awgproxy не найден в tools\\")
+        flags = 0x08000000 if sys.platform.startswith("win") else 0
+        out = subprocess.run([exe, "-selftest"], capture_output=True, timeout=60, shell=False, creationflags=flags)
+        text = (out.stdout or b"").decode("utf-8", "replace").strip().splitlines()
+        res = json.loads(text[-1]) if text else {}
+        if res.get("ok"):
+            return {k: res.get(k) for k in ("bind", "hello", "dns_through_tunnel", "bad_auth_rejected", "first_ms")}
+        err = str(res.get("error") or (out.stderr or b"").decode("utf-8", "replace"))[:300]
+        if under_wine() and ("wsaioctl" in err.lower() or "10045" in err or "not supported" in err.lower()):
+            return "пропущено: Wine не поддерживает UDP-сокеты Go (WSAEOPNOTSUPP); на Windows проверяется этим же шагом"
+        raise RuntimeError(err or f"код {out.returncode}")
+
+    step("awgproxy", lambda: {"path": find_tool("awgproxy"), "version": _version(find_tool("awgproxy"), "-version")})
+    step("awg_tunnel", awg_tunnel)
+
+    def update_swap():
+        import zipfile
+        from . import updater
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            app = d / "own-tube"
+            app.mkdir()
+            (app / "own-tube.exe").write_bytes(b"old")
+            z = d / "u.zip"
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("own-tube-9.9.9-win-x64/own-tube.exe", b"new")
+                zf.writestr("own-tube-9.9.9-win-x64/tools/x.txt", b"x")
+            staged = updater.extract(z, d / "stage")
+            p = subprocess.Popen([sys.executable, "--version"] if not getattr(sys, "frozen", False) else ["cmd", "/c", "exit"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
+                                 creationflags=0x08000000 if sys.platform.startswith("win") else 0)
+            p.wait()
+            res = updater.apply(updater.make_plan(app, staged, "9.9.9", "0.0.1", pid=p.pid), relaunch=False, wait=10)
+            if not res["ok"] or (app / "own-tube.exe").read_bytes() != b"new" or not (d / "own-tube.old-0.0.1" / "own-tube.exe").is_file():
+                raise RuntimeError(str(res))
+            try:
+                updater._check_url("https://evil.example/x")
+                raise RuntimeError("проверка адреса не сработала")
+            except updater.UpdateError:
+                pass
+            return "замена папки и резервная копия: ок"
+
+    step("update_swap", update_swap)
     report["ok"] = ok
     Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if ok else 1

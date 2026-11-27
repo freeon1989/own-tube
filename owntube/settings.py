@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -44,6 +45,7 @@ def default_download_dir() -> str:
 class Settings:
     proxy: str = ""          # scheme://host:port, без логина и пароля
     proxy_user: str = ""     # логин прокси; пароль хранится отдельно и зашифрован
+    net_mode: str = "proxy"  # proxy: прокси из настроек (или напрямую) | awg: встроенный VPN AmneziaWG (конфигурация — только DPAPI)
     ai_configs: list = field(default_factory=list)  # без ключей API
     quality: str = "best"
     codec: str = "auto"      # auto | h264
@@ -64,6 +66,8 @@ class Settings:
     stt_model: str = "whisper-1"
     stt_autosend: bool = True  # отправлять сообщение сразу после распознавания
     whisper_dir: str = ""     # где лежит/куда ставить whisper.cpp; пусто — папка данных программы
+    update_check: bool = True  # при запуске один запрос к api.github.com: есть ли новая версия (ставится только по кнопке)
+    update_skip: str = ""     # версия, о которой не напоминать
 
     def public(self) -> dict:
         return asdict(self)
@@ -109,6 +113,7 @@ def _validated(raw: dict, strict: bool = False) -> Settings:
 
     take("proxy", validate.clean_proxy)
     take("proxy_user", validate.clean_proxy_user)
+    take("net_mode", lambda v: validate.clean_choice(v, ("proxy", "awg"), "режим сети"))
     take("ai_configs", _clean_ai_configs)
     take("quality", validate.clean_quality)
     take("player_mode", lambda v: validate.clean_choice(v, ("embedded", "mpv"), "режим плеера"))
@@ -125,6 +130,14 @@ def _validated(raw: dict, strict: bool = False) -> Settings:
     take("ai_autorun", boolean)
     take("voice_tts", boolean)
     take("stt_autosend", boolean)
+    take("update_check", boolean)
+
+    def version(v):
+        if not isinstance(v, str) or (v and not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}", v)):
+            raise ValueError("Неверный номер версии")
+        return v
+
+    take("update_skip", version)
 
     def ranged(lo, hi):
         def f(v):

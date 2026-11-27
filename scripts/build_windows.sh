@@ -1,7 +1,8 @@
 #!/bin/bash
 # Кросс-сборка own-tube для Windows на Linux: Wine + CPython 3.12 amd64 + PyInstaller (onedir).
 # Внешние программы (mpv, ffmpeg, deno) скачиваются scripts/fetch_tools.py с проверкой SHA-256.
-# Результат: $OUT_DIR/own-tube-<версия>-win-x64.zip и .sha256
+# awgproxy.exe (встроенный VPN) собирается из helper/awgproxy скриптом scripts/build_awg_helper.sh (нужен Go).
+# Результат: $OUT_DIR/own-tube-<версия>-win-x64.zip, own-tube-win-x64.zip (то же, имя для обновления) и .sha256 к каждому
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -33,6 +34,8 @@ xvfb-run -a wine "$PY_WIN" -m pip install -q --disable-pip-version-check -r requ
 
 echo "== внешние программы (проверка SHA-256) =="
 python3 scripts/fetch_tools.py "$CACHE" "$ROOT/build/tools"
+echo "== awgproxy.exe (Go, воспроизводимая сборка) =="
+bash scripts/build_awg_helper.sh "$ROOT/build/tools"
 
 echo "== PyInstaller =="
 rm -rf "$ROOT/build/pyi" "$ROOT/dist/own-tube" "$STAGE"
@@ -44,7 +47,8 @@ echo "== папка программы =="
 mkdir -p "$STAGE/$PKG"
 cp -r dist/own-tube/. "$STAGE/$PKG/"
 mkdir -p "$STAGE/$PKG/tools"
-cp build/tools/mpv.exe build/tools/ffmpeg.exe build/tools/deno.exe build/tools/SOURCES.txt build/tools/ffmpeg-LICENSE.txt "$STAGE/$PKG/tools/"
+cp build/tools/mpv.exe build/tools/ffmpeg.exe build/tools/deno.exe build/tools/SOURCES.txt build/tools/ffmpeg-LICENSE.txt \
+   build/tools/awgproxy.exe build/tools/SOURCES-awgproxy.txt "$STAGE/$PKG/tools/"
 cp LICENSE "$STAGE/$PKG/LICENSE.txt"
 cp docs/START.txt "$STAGE/$PKG/START.txt"
 if find "$STAGE" \( -iname '*.db' -o -iname 'settings.json' -o -iname '*.key' -o \( -iname '*.pem' ! -path '*/certifi/*' \) -o -iname '.env*' \) | grep -q .; then
@@ -72,4 +76,7 @@ with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as
         if f.is_file(): z.write(f, f.as_posix())
 " "$ZIP" )
 ( cd "$OUT_DIR" && sha256sum "$PKG.zip" > "$PKG.zip.sha256" && cat "$PKG.zip.sha256" )
+# постоянное имя для /releases/latest/download/ и обновления внутри программы
+cp "$ZIP" "$OUT_DIR/own-tube-win-x64.zip"
+( cd "$OUT_DIR" && sha256sum own-tube-win-x64.zip > own-tube-win-x64.zip.sha256 && cat own-tube-win-x64.zip.sha256 )
 echo "готово: $ZIP"

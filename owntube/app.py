@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 
 from . import __version__
 from .api import Api
@@ -36,7 +37,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"own-tube {__version__}")
     parser.add_argument("--selftest", metavar="FILE", help="проверить поиск, потоки и программы без окна; отчёт в FILE")
     parser.add_argument("--login", choices=("google", "vk"), help=argparse.SUPPRESS)
+    parser.add_argument("--apply-update", metavar="PLAN", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.apply_update:
+        from .updater import apply_main
+        return apply_main(args.apply_update)
     if args.selftest:
         from .selftest import run
         return run(args.selftest)
@@ -47,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
 
     import webview  # импорт здесь: тесты и скриншоты обходятся без окна
 
+    if getattr(sys, "frozen", False):
+        from .updater import cleanup_staging
+        threading.Thread(target=cleanup_staging, daemon=True).start()
     api = Api()
     window = webview.create_window(f"own-tube {__version__}", str(UI_DIR / "index.html"), js_api=api,
                                    width=1440, height=900, min_size=(960, 620), background_color="#09081a")

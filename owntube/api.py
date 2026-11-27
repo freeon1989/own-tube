@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import functools
 import importlib
+import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -21,9 +23,10 @@ from .ai import assistant as ai_assistant
 from . import player as player_mod
 from .db import Store, clean_item
 from .downloads import Downloader
+from . import awg as awg_mod, updater
 from .network import ManualProxy, RouteError, RouteProvider
 from .settings import SettingsStore
-from .tools import find_tool
+from .tools import app_dir, find_tool
 
 log = logging.getLogger("owntube.api")
 
@@ -55,10 +58,11 @@ class Api:
         self._store = store or SettingsStore()
         self._db = db or Store(self._store.dir / "own-tube.db")
         self._player = player or player_mod.Player()
-        self._routes = routes or ManualProxy(
-            lambda: self._store.value.proxy,
-            lambda: self._store.value.proxy_user,
-            self._store.proxy_password,
+        self._awg = awg_mod.AwgProvider(self._awg_config)
+        self._routes = routes or awg_mod.SwitchRoutes(
+            lambda: self._store.value.net_mode,
+            ManualProxy(lambda: self._store.value.proxy, lambda: self._store.value.proxy_user, self._store.proxy_password),
+            self._awg,
         )
         self._search_fn = search_fn
         self._cache = lists.FeedCache(self._store.dir / "feedcache.json")
@@ -74,6 +78,8 @@ class Api:
         self._installer = voice.Installer()
         self._stt_lock = threading.Lock()
         self._prefetching: set = set()
+        self._update_job = updater.Job()
+        self._update_info = None
 
     def _media_server(self):
         with self._lock:
@@ -148,14 +154,210 @@ class Api:
 
     @safe
     def check_route(self):
-        """Проверка по шагам: TCP, вход на прокси, youtube.com, обложки, поиск yt-dlp."""
-        if not isinstance(self._routes, ManualProxy):
-            return self._routes.check()  # свой провайдер маршрута (например, будущий VPN) проверяет себя сам
+        """Проверка по шагам: (VPN), TCP, вход на прокси, youtube.com, обложки, поиск, видео."""
+        vpn = isinstance(self._routes, awg_mod.SwitchRoutes) and self._routes.vpn
+        if not vpn and not isinstance(self._routes, (ManualProxy, awg_mod.SwitchRoutes)):
+            return self._routes.check()  # свой провайдер маршрута проверяет себя сам
+        first = None
+        if vpn:
+            t = time.monotonic()
+            res = self._awg.check()
+            first = {"name": "Встроенный VPN (AmneziaWG)", "ok": res["ok"], "detail": res["detail"],
+                     "ms": int((time.monotonic() - t) * 1000)}
+            if not res["ok"]:
+                out = {"ok": False, "steps": [first]}
+                log.info("Проверка связи: %s — сбой (%s)", first["name"], first["detail"])
+                return out
         out = diagnostics.run(self._routes.current(), self._diag_search,
                               None if self._search_fn else self._diag_video, None if self._search_fn else self._diag_pipe)
+        if first:
+            out["steps"].insert(0, first)
         for st in out["steps"]:
             log.info("Проверка связи: %s — %s (%s)", st["name"], "OK" if st["ok"] else "сбой", st["detail"])
         return out
+
+    # --- встроенный VPN (AmneziaWG) ---
+    def _awg_config(self):
+        raw = self._store.secrets.get(awg_mod.SECRET_NAME)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return None
+
+    def _vpn_state(self, probe: bool = False) -> dict:
+        cfg = self._awg_config()
+        return {"enabled": self._store.value.net_mode == "awg", "imported": bool(cfg),
+                "config": awg_mod.summary(cfg) if cfg else None,
+                "helper": bool(self._awg._find()),
+                "persist": self._store.secrets.can_persist,
+                "status": self._awg.status(probe) if cfg else {"running": False}}
+
+    # --- обновление из релизов GitHub ---
+    @safe
+    def update_check(self, auto=False):
+        """Один запрос к api.github.com через маршрут программы. auto=True — проверка при запуске (учитывает настройку)."""
+        st = self._store.value
+        if auto and not st.update_check:
+            return {"disabled": True}
+        try:
+            info = updater.check(self._routes.current(), st.update_skip)
+        except updater.UpdateError as exc:
+            if auto:
+                log.info("Проверка обновлений: %s", exc)
+                return {"error": str(exc)}
+            raise ValueError(str(exc)) from None
+        self._update_info = info
+        if info["available"]:
+            log.info("Доступна новая версия %s", info["version"])
+        return {k: info[k] for k in ("version", "current", "available", "skipped", "notes", "url", "published", "has_assets")} | {
+            "frozen": bool(getattr(sys, "frozen", False)), "backup": self._update_backup()}
+
+    @safe
+    def update_open_page(self):
+        """Открыть страницу релиза в браузере (только github.com/freeon1989/own-tube)."""
+        info = self._update_info or {}
+        url = str(info.get("url") or updater.PAGE_LATEST)
+        if not url.startswith(f"https://github.com/{updater.REPO}/releases"):
+            raise ValueError("Неверный адрес")
+        import webbrowser
+        webbrowser.open(url)
+        return {}
+
+    def _update_backup(self):
+        if not getattr(sys, "frozen", False):
+            return None
+        b = updater.backups(app_dir())
+        return b[0].name.rsplit(".old-", 1)[-1] if b else None
+
+    @safe
+    def update_skip(self, version):
+        with self._lock:
+            self._store.update({"update_skip": str(version or "")})
+        return {"settings": self._store.export()}
+
+    @safe
+    def update_download(self):
+        info = getattr(self, "_update_info", None)
+        if not info or not info.get("available"):
+            raise ValueError("Сначала проверьте обновления")
+        if not getattr(sys, "frozen", False):
+            raise ValueError("Обновление ставится только в собранную программу (own-tube.exe); из исходников — git pull")
+        if not updater.can_write(app_dir().parent):
+            raise ValueError("Нет прав на запись рядом с папкой программы — скачайте архив со страницы релиза вручную")
+        self._update_job.start(info, self._routes.current())
+        return self._update_job.state
+
+    @safe
+    def update_progress(self):
+        return dict(self._update_job.state)
+
+    @safe
+    def update_cancel(self):
+        self._update_job.cancel()
+        return dict(self._update_job.state)
+
+    @safe
+    def update_apply(self):
+        """Только по нажатию «Обновить»: запускает замену и закрывает программу."""
+        st = self._update_job.state
+        if st.get("stage") != "ready":
+            raise ValueError("Обновление ещё не готово")
+        plan = updater.make_plan(app_dir(), Path(st["staged"]), st["version"])
+        updater.launch(plan, self._store.dir)
+        log.info("Обновление до %s: программа закрывается для замены файлов", st["version"])
+        threading.Timer(0.5, self._close_window).start()
+        return {"closing": True}
+
+    @safe
+    def update_rollback(self):
+        """Вернуть предыдущую версию из резервной копии (её же механизмом замены)."""
+        if not getattr(sys, "frozen", False):
+            raise ValueError("Откат доступен только в собранной программе")
+        b = updater.backups(app_dir())
+        if not b:
+            raise ValueError("Резервной копии нет")
+        ver = b[0].name.rsplit(".old-", 1)[-1]
+        root = updater.staging_root() / ("rollback-" + ver)
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.copytree(b[0], root)
+        updater.launch(updater.make_plan(app_dir(), root, ver), self._store.dir)
+        threading.Timer(0.5, self._close_window).start()
+        return {"closing": True}
+
+    @safe
+    def update_result(self):
+        """Итог последней замены (показывается один раз после перезапуска)."""
+        p = self._store.dir / "update-result.json"
+        try:
+            res = json.loads(p.read_text(encoding="utf-8"))
+            p.unlink()
+            return {"result": res}
+        except (OSError, ValueError):
+            return {"result": None}
+
+    def _close_window(self):
+        try:
+            if self._window is not None:
+                self._window.destroy()
+        except Exception:
+            pass
+
+    @safe
+    def vpn_state(self, probe=False):
+        return self._vpn_state(bool(probe))
+
+    def _vpn_store(self, cfg: dict) -> dict:
+        text = json.dumps(cfg, ensure_ascii=False)
+        saved = self._store.secrets.set(text, awg_mod.SECRET_NAME)
+        self._awg.stop()  # новая конфигурация — новый туннель при следующем запросе
+        log.info("VPN: конфигурация импортирована (%s)%s", awg_mod.summary(cfg)["kind"], "" if saved else ", только до закрытия программы")
+        return self._vpn_state()
+
+    @safe
+    def vpn_import_text(self, text):
+        if not isinstance(text, str):
+            raise ValueError("Нужна ссылка vpn:// или текст конфигурации")
+        return self._vpn_store(awg_mod.parse_any(text))
+
+    @safe
+    def vpn_import_file(self):
+        p = self._dialog(False, ("AmneziaWG (*.conf;*.txt;*.vpn)", "Все файлы (*.*)"))
+        if p is None:
+            return {"cancelled": True}
+        if p.stat().st_size > 200_000:
+            raise ValueError("Файл слишком большой для конфигурации")
+        return self._vpn_store(awg_mod.parse_any(p.read_text(encoding="utf-8", errors="replace")))
+
+    @safe
+    def vpn_enable(self, on):
+        if not isinstance(on, bool):
+            raise ValueError("Ожидалось да/нет")
+        if on and not self._awg_config():
+            raise ValueError("Сначала импортируйте конфигурацию AmneziaWG")
+        with self._lock:
+            self._store.update({"net_mode": "awg" if on else "proxy"})
+        if on:
+            self._awg.current()  # поднимаем сразу, чтобы ошибка была видна здесь же
+        else:
+            self._awg.stop()
+        return {**self._vpn_state(probe=on), "settings": self._store.export()}
+
+    @safe
+    def vpn_restart(self):
+        self._awg.stop()
+        self._awg.current()
+        return self._vpn_state(probe=True)
+
+    @safe
+    def vpn_forget(self):
+        self._awg.stop()
+        self._store.secrets.delete(awg_mod.SECRET_NAME)
+        with self._lock:
+            self._store.update({"net_mode": "proxy"})
+        log.info("VPN: конфигурация удалена")
+        return {**self._vpn_state(), "settings": self._store.export()}
 
     @safe
     def read_log(self, lines=300):
@@ -712,6 +914,7 @@ class Api:
 
     def _shutdown(self) -> None:
         self._player.stop()
+        self._awg.stop()
         try:
             from . import httpc
             httpc.close_pool()

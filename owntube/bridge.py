@@ -321,6 +321,10 @@ def _local_a(host: str) -> list[str]:
     return list(dict.fromkeys(i[4][0] for i in infos))
 
 
+def _is_local_proxy(proxy: str) -> bool:
+    return (urlsplit(proxy).hostname or "") in ("127.0.0.1", "localhost", "::1")
+
+
 def _resolve_ipv4(proxy: str, user: str, password: str, host: str) -> tuple[list[str], str]:
     now = time.time()
     with _dns_lock:
@@ -333,7 +337,8 @@ def _resolve_ipv4(proxy: str, user: str, password: str, host: str) -> tuple[list
         ips, how = _doh_a(proxy, user, password, host), "DoH через прокси"
     except Exception as exc:
         log.debug("DoH через прокси не сработал: %s", validate.redact(str(exc))[:100])
-    if not ips:
+    if not ips and not _is_local_proxy(proxy):
+        # прокси на 127.0.0.1 — это встроенный VPN или локальный клиент: DNS мимо туннеля не спрашиваем
         ips, how = _local_a(host), "локальный DNS"
     if ips:
         with _dns_lock:

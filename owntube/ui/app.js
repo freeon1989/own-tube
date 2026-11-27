@@ -1,5 +1,5 @@
 "use strict";
-/* own-tube 0.2.3. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
+/* own-tube 0.3.0. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
 (function () {
   const NS = "http://www.w3.org/2000/svg";
   const $ = (id) => document.getElementById(id);
@@ -1086,8 +1086,184 @@
         h("button", { class: "ghost", type: "button", onclick: showLog }, "Журнал"),
         clearBtn),
       netMsg, steps,
-      h("p", { class: "note" }, S.proxy_password_note || "Пароль не записывается в settings.json."),
-      h("div", { class: "row asst stub" }, h("span"), h("div", { class: "nm" }, h("b", {}, "VPN AmneziaWG"), h("span", {}, "Выбор своего сервера и маршрут только для own-tube")), h("span"), h("span"), h("span", { class: "pill" }, "скоро")));
+      h("p", { class: "note" }, S.proxy_password_note || "Пароль не записывается в settings.json."));
+  }
+
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " Б";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " КБ";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " МБ";
+    return (n / 1073741824).toFixed(2) + " ГБ";
+  }
+
+  /* Встроенный VPN AmneziaWG: туннель только для own-tube, без системного адаптера и прав администратора */
+  function buildVpnPanel() {
+    const msg = h("p", { class: "note", id: "vpnMsg" });
+    const info = h("div", { class: "vpn-info", id: "vpnInfo" });
+    const stat = h("p", { class: "note vpn-stat", id: "vpnStat" });
+    const input = h("textarea", { class: "vpn-input", rows: "3", placeholder: "Вставьте ссылку vpn://… из AmneziaVPN или текст конфигурации AmneziaWG ([Interface] … [Peer] …)",
+      "aria-label": "Ссылка или конфигурация AmneziaWG", spellcheck: "false", autocomplete: "off" });
+    let state = null;
+    const modeSeg = h("div", { class: "seg", role: "radiogroup", "aria-label": "Как выходить в сеть" });
+    function say(text, kind) { msg.textContent = text || ""; msg.className = "note " + (kind === "ok" ? "ok-text" : kind === "bad" ? "bad-text" : ""); }
+    function renderMode() {
+      const on = !!(state && state.enabled);
+      modeSeg.replaceChildren(...[[false, "Прокси из настроек / напрямую"], [true, "Встроенный VPN"]].map(([v, t]) => {
+        const b = h("button", { type: "button", role: "radio", "aria-checked": String(on === v), "data-vpn": String(v) }, t);
+        b.addEventListener("click", () => setMode(v));
+        return b;
+      }));
+    }
+    function render() {
+      renderMode();
+      const c = state && state.config;
+      info.replaceChildren(c
+        ? h("div", { class: "row asst" }, h("span", { class: "dot " + (state.status && state.status.running ? "ok" : "") }),
+            h("div", { class: "nm" }, h("b", {}, c.name), h("span", {}, c.kind + " · сервер " + c.server + (c.obf.length ? " · " + c.obf.join(", ") : "") + " · DNS через туннель")),
+            h("button", { class: "ghost", type: "button", onclick: restart }, "Перезапустить"),
+            h("button", { class: "ghost", type: "button", onclick: forget }, "Удалить"))
+        : h("p", { class: "note" }, "Конфигурация не импортирована."));
+      const st = (state && state.status) || {};
+      if (!state || !state.config) stat.textContent = "";
+      else if (!st.running) stat.textContent = state.enabled ? ("Туннель не запущен" + (st.error ? ": " + st.error : "")) : "Выключен — трафик идёт через прокси из настроек или напрямую.";
+      else {
+        const hs = st.handshake_age_sec;
+        stat.textContent = "Работает · рукопожатие: " + (hs == null || hs < 0 ? "ещё не было" : hs + " с назад") +
+          " · ↓ " + fmtBytes(st.rx) + " ↑ " + fmtBytes(st.tx) +
+          (st.latency_ms != null ? " · до YouTube " + st.latency_ms + " мс" : "") + (st.probe_error ? " · " + st.probe_error : "");
+      }
+      stat.className = "note vpn-stat " + (st.running ? "ok-text" : "");
+      if (state && !state.helper) say("Нет tools\\awgproxy.exe рядом с программой — встроенный VPN недоступен.", "bad");
+    }
+    async function refresh(probe) {
+      const r = await call("vpn_state", !!probe);
+      if (r.ok) { state = r; render(); }
+    }
+    async function setMode(on) {
+      say(on ? "Поднимаю туннель…" : "Выключаю…");
+      const r = await call("vpn_enable", on);
+      if (!r.ok) { say(r.error, "bad"); return; }
+      state = r; if (r.settings) S = r.settings;
+      render(); updateRouteChip();
+      say(on ? "Встроенный VPN включён: весь трафик own-tube идёт через туннель." : "VPN выключен.", "ok");
+    }
+    async function doImport(r) {
+      if (r.cancelled) return;
+      if (!r.ok) { say(r.error, "bad"); return; }
+      input.value = "";
+      state = r; render();
+      say("Конфигурация импортирована и зашифрована." + (r.persist ? "" : " Внимание: хранилище секретов недоступно — до закрытия программы."), "ok");
+    }
+    async function restart() { say("Перезапускаю…"); const r = await call("vpn_restart"); if (r.ok) { state = r; render(); say("Туннель перезапущен", "ok"); } else say(r.error, "bad"); }
+    async function forget() {
+      const r = await call("vpn_forget");
+      if (!r.ok) { say(r.error, "bad"); return; }
+      state = r; if (r.settings) S = r.settings; render(); updateRouteChip(); say("Конфигурация удалена", "ok");
+    }
+    const timer = setInterval(() => { if (!document.body.contains(stat)) { clearInterval(timer); return; } if (state && state.status && state.status.running) refresh(false); }, 5000);
+    refresh(false);
+    return panel("vpn", "globe", "Встроенный VPN (AmneziaWG)",
+      "Туннель только для own-tube: остальные программы и браузер идут как обычно. Не нужны права администратора и отдельный клиент. Подходит та же ссылка vpn://, что и для AmneziaVPN (протокол AmneziaWG), или файл .conf.",
+      field("Как выходить в сеть", modeSeg),
+      field("Импорт", input),
+      h("div", { class: "row2" },
+        h("button", { class: "go", type: "button", onclick: async () => doImport(await call("vpn_import_text", input.value)) }, "Импортировать"),
+        h("button", { class: "ghost", type: "button", onclick: async () => doImport(await call("vpn_import_file")) }, ic("upload"), " Файл .conf…"),
+        h("button", { class: "ghost", type: "button", onclick: () => refresh(true) }, "Обновить состояние")),
+      info, stat, msg,
+      h("p", { class: "note" }, "Ключи хранятся только в зашифрованном хранилище Windows (DPAPI): их нет в settings.json и в журнале. «Проверить связь» в разделе выше работает и через VPN."));
+  }
+
+  function buildUpdatePanel(version) {
+    const msg = h("p", { class: "note" });
+    const box = h("div", { class: "upd-box" });
+    const bar = h("progress", { class: "upd-bar", max: "100", value: "0", hidden: true });
+    let info = null, poll = null;
+    function say(text, kind) { msg.textContent = text || ""; msg.className = "note " + (kind === "ok" ? "ok-text" : kind === "bad" ? "bad-text" : ""); }
+    function render() {
+      box.replaceChildren();
+      if (!info) return;
+      if (!info.available) {
+        box.append(h("p", { class: "note ok-text" }, "У вас последняя версия (" + info.current + ")."));
+      } else {
+        box.append(h("p", {}, h("b", {}, "Доступна own-tube " + info.version), info.published ? " · " + new Date(info.published).toLocaleDateString("ru-RU") : ""));
+        box.append(h("div", { class: "upd-notes" }, ...(info.notes ? info.notes.split("\n").map((line) => {
+          const t = line.replace(/\*\*/g, "").replace(/`/g, "");
+          return /^#{1,6}\s/.test(t) ? h("b", { class: "upd-h" }, t.replace(/^#+\s*/, "")) : h("div", {}, t.replace(/^\s*[-*]\s+/, "• ") || "\u00a0");
+        }) : ["Описание — на странице релиза."])));
+        const row = h("div", { class: "row2" });
+        if (info.frozen && info.has_assets) row.append(h("button", { class: "go", type: "button", onclick: download }, ic("download"), " Скачать и обновить"));
+        row.append(h("button", { class: "ghost", type: "button", onclick: () => call("update_open_page") }, ic("link"), " Страница релиза"));
+        if (!info.skipped) row.append(h("button", { class: "ghost", type: "button", onclick: skip }, "Пропустить эту версию"));
+        box.append(row);
+        if (!info.frozen) box.append(h("p", { class: "note" }, "Запуск из исходников: обновите через git pull."));
+      }
+      if (info.backup) box.append(h("p", { class: "note" }, "Есть резервная копия версии " + info.backup + ". ",
+        h("button", { class: "ghost", type: "button", onclick: rollback }, "Вернуть " + info.backup)));
+    }
+    async function check() {
+      say("Проверяю…");
+      const r = await call("update_check", false);
+      if (!r.ok) { say(r.error, "bad"); return; }
+      info = r; say(""); render();
+    }
+    async function skip() {
+      const r = await call("update_skip", info.version);
+      if (r.ok) { S = r.settings; info.skipped = true; render(); say("Не буду напоминать о версии " + info.version, "ok"); }
+    }
+    async function download() {
+      const r = await call("update_download");
+      if (!r.ok) { say(r.error, "bad"); return; }
+      bar.hidden = false;
+      clearInterval(poll);
+      poll = setInterval(progress, 700);
+    }
+    async function progress() {
+      if (!document.body.contains(bar)) { clearInterval(poll); return; }
+      const r = await call("update_progress");
+      if (!r.ok) return;
+      if (r.stage === "download") { bar.value = r.total ? Math.round(r.done * 100 / r.total) : 0; say("Скачиваю: " + fmtBytes(r.done) + (r.total ? " из " + fmtBytes(r.total) : "")); }
+      else if (r.stage === "extract") say("Контрольная сумма совпала, распаковываю…");
+      else if (r.stage === "error") { clearInterval(poll); bar.hidden = true; say(r.error, "bad"); }
+      else if (r.stage === "ready") {
+        clearInterval(poll); bar.value = 100;
+        say("Версия " + r.version + " скачана и проверена (SHA-256).", "ok");
+        box.append(h("div", { class: "row2" }, h("button", { class: "go", type: "button", onclick: apply }, "Обновить и перезапустить"),
+          h("span", { class: "note" }, "Программа закроется, заменит файлы (старая версия останется резервной копией) и откроется снова. Настройки и данные сохраняются.")));
+      }
+    }
+    async function apply() {
+      const r = await call("update_apply");
+      if (!r.ok) { say(r.error, "bad"); return; }
+      say("Закрываюсь для обновления…", "ok");
+    }
+    async function rollback() {
+      if (!confirm("Вернуть версию " + info.backup + "? Программа закроется и откроется снова.")) return;
+      const r = await call("update_rollback");
+      if (!r.ok) say(r.error, "bad");
+    }
+    return panel("about", "check", "О программе и обновления",
+      "own-tube " + version + " · github.com/freeon1989/own-tube · MIT. Обновления берутся только из релизов GitHub, архив сверяется по SHA-256 и ставится только по кнопке.",
+      field("Проверять при запуске", sw(S.update_check !== false, (v) => saveSettings({ update_check: v }), "Проверять обновления при запуске"),
+        h("span", { class: "note" }, "один запрос к api.github.com через выбранный маршрут (прокси/VPN), без статистики")),
+      h("div", { class: "row2" }, h("button", { class: "go", type: "button", onclick: check }, "Проверить обновления")),
+      box, bar, msg);
+  }
+
+  async function startupUpdate() {
+    const done = await call("update_result");
+    if (done.ok && done.result) {
+      const x = done.result;
+      status(x.ok ? "Обновлено до own-tube " + x.to + "." : "Обновление не установлено: " + (x.error || "ошибка"), x.ok ? "" : "err");
+    }
+    const r = await call("update_check", true);
+    if (!r.ok || !r.available || r.skipped) return;
+    const ban = h("div", { class: "upd-banner", role: "status" },
+      h("span", {}, "Доступна own-tube " + r.version),
+      h("button", { class: "go", type: "button", onclick: () => { ban.remove(); go("settings", "about"); } }, "Подробнее"),
+      h("button", { class: "ghost", type: "button", onclick: () => ban.remove() }, "Позже"));
+    document.body.append(ban);
   }
 
   function buildAiSection() {
@@ -1259,7 +1435,7 @@
     const dlDir = h("input", { type: "text", value: S.download_dir, readonly: true, "aria-label": "Папка загрузок" });
     const tkMsg = h("p", { class: "note" });
 
-    const cats = [["look", "Оформление"], ["play", "Воспроизведение"], ["net", "Сеть"], ["data", "Данные"], ["accounts", "Аккаунты"], ["ai", "ИИ"], ["voice", "Голос"]];
+    const cats = [["look", "Оформление"], ["play", "Воспроизведение"], ["net", "Сеть"], ["vpn", "VPN"], ["data", "Данные"], ["accounts", "Аккаунты"], ["ai", "ИИ"], ["voice", "Голос"], ["about", "О программе"]];
     view(title("Настройки", h("small", {}, "own-tube " + st.version)),
       h("div", { class: "subnav" }, ...cats.map(([id, t]) => h("button", { type: "button", onclick: () => $("set-" + id).scrollIntoView({ block: "start" }) }, t))),
       panel("look", "palette", "Оформление и помощницы", "Тема меняет цвета всего окна. «Как у помощницы» — у каждой своя.", themeOpts, h("div", { class: "row2" }), ...asstRows),
@@ -1279,6 +1455,7 @@
         field("Путь к mpv", mpvPath, h("button", { class: "ghost", type: "button", onclick: async () => { if (await saveSettings({ mpv_path: mpvPath.value })) status("Сохранено"); } }, "Сохранить")),
         h("div", { class: "toolstate" }, toolPill("mpv", "mpv"), toolPill("ffmpeg", "ffmpeg (встроенный плеер и загрузки)"), toolPill("deno", "deno (для YouTube)"))),
       buildNetPanel(netMsg),
+      buildVpnPanel(),
       panel("data", "folder", "Данные", "Всё хранится только на этом компьютере (SQLite в папке пользователя).",
         field("Google Takeout", h("button", { class: "go", type: "button", onclick: async () => {
           tkMsg.textContent = "Читаю файл…";
@@ -1297,6 +1474,7 @@
       buildAccountsPanel(),
       buildAiSection(),
       buildVoicePanel(),
+      buildUpdatePanel(st.version),
     );
     status("");
     if (section) { const el = $("set-" + section); if (el) el.scrollIntoView({ block: "start" }); }
@@ -1439,8 +1617,9 @@
   }
   function updateRouteChip() {
     const p = S.proxy;
-    $("routeText").textContent = !p ? "Напрямую" : (p.startsWith("socks") ? "SOCKS-прокси" : "HTTP-прокси");
-    $("routeDot").className = "dot" + (p ? " ok" : "");
+    const vpn = S.net_mode === "awg";
+    $("routeText").textContent = vpn ? "VPN AmneziaWG" : !p ? "Напрямую" : (p.startsWith("socks") ? "SOCKS-прокси" : "HTTP-прокси");
+    $("routeDot").className = "dot" + (p || vpn ? " ok" : "");
   }
   function setQuality(q) {
     document.querySelectorAll("#qualitySeg button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.q === q)));
@@ -1468,6 +1647,7 @@
     else if (!st.tools.mpv && S.player_mode === "mpv") status("mpv не найден — видео не запустится. Проверьте папку tools рядом с программой.", "err");
     const first = new URLSearchParams(location.search).get("view");
     go(first || "home");
+    setTimeout(startupUpdate, 4000);
   }
 
   if (window.pywebview && window.pywebview.api) start();
