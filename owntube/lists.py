@@ -81,6 +81,46 @@ def _slice(key: str, n: int) -> tuple[list, dict | None]:
     return part, nxt
 
 
+# ---------- ленты аккаунта Google: yt-dlp отдаёт список целиком, режем на страницы и дозапрашиваем глубже ----------
+ACCT_KINDS = ("recommended", "subs", "history", "later", "liked", "playlist")
+ACCT_FIRST = 48
+ACCT_MAX = 300
+ACCT_TTL = 300
+_acct: dict[tuple, tuple[float, list, bool]] = {}
+_acct_lock = threading.Lock()
+
+
+def account_page(kind: str, arg, route: Route, n: int = 0, force: bool = False) -> tuple[list, dict | None]:
+    """Страница ленты аккаунта. Список целиком держим 5 минут; если нужна страница глубже — берём больше (до 300)."""
+    if kind not in ACCT_KINDS:
+        raise ValueError("Неизвестная лента аккаунта")
+    key = (kind, str(arg or ""))
+    with _acct_lock:
+        hit = _acct.get(key)
+    fresh = bool(hit) and time.time() - hit[0] < ACCT_TTL and not (force and n == 0)
+    if not fresh or (len(hit[1]) < n + PAGE and not hit[2]):
+        have = len(hit[1]) if hit else 0
+        limit = ACCT_FIRST if n == 0 else min(ACCT_MAX, max(n + 2 * PAGE, 2 * have))
+        items = yt.account_items(kind, route, limit, arg)
+        exhausted = len(items) < limit or limit >= ACCT_MAX
+        with _acct_lock:
+            _acct[key] = (time.time(), items, exhausted)
+            while len(_acct) > 12:
+                _acct.pop(next(iter(_acct)))
+        hit = (time.time(), items, exhausted)
+    items, exhausted = hit[1], hit[2]
+    part = items[n:n + PAGE]
+    more = None
+    if n + PAGE < len(items) or (not exhausted and n + PAGE <= ACCT_MAX):
+        more = {"k": "y", "kind": "acct", "q": kind, "arg": str(arg or "")[:60], "n": n + PAGE}
+    return part, more
+
+
+def account_forget() -> None:
+    with _acct_lock:
+        _acct.clear()
+
+
 # ---------- запросы ----------
 def _it_search(q: str, route: Route, sp: str, shorts: bool, token: str = "") -> tuple[list, dict | None]:
     items, nxt = innertube.search(q, route, sp, token, shorts)
@@ -170,6 +210,8 @@ def more(cursor: dict, route: Route) -> tuple[list, dict | None]:
             return items, ({**cursor, "t": nxt} if nxt else None)
         items, nxt = innertube.search("", route, "", cursor["t"], bool(cursor.get("sh")))
         return items, ({**cursor, "t": nxt} if nxt else None)
+    if k == "y" and cursor.get("kind") == "acct":
+        return account_page(cursor.get("q", ""), cursor.get("arg") or None, route, cursor.get("n", 0))
     if k == "y":
         return _ydl_search(validate.clean_query(cursor.get("q", "")), route, cursor.get("sp", ""),
                            bool(cursor.get("sh")), cursor.get("n", 0))

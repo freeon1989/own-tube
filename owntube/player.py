@@ -55,25 +55,36 @@ def container_for(vcodec: str | None, acodec: str | None) -> str:
     return "mp4"
 
 
-def ffmpeg_command(ffmpeg: str, streams: dict, start: float = 0.0, http_proxy: str = "") -> list[str]:
-    """Перепаковка без перекодирования в поток для <video>. Адреса проверены, процесс — без shell."""
+def ffmpeg_command(ffmpeg: str, streams: dict, start: float = 0.0, http_proxy: str = "",
+                   local: dict | None = None) -> list[str]:
+    """Перепаковка без перекодирования в поток для <video>. Адреса проверены, процесс — без shell.
+
+    local={"video": url, "audio": url} — потоки читаются с нашего локального сервера (streamsrc): прокси, заголовки
+    и повторы тогда на его стороне, ffmpeg получает обычный файл с Range без дросселирования."""
     if not validate.is_stream_url(streams.get("video"), streams.get("source", "yt")):
         raise PlayerError("Небезопасный адрес потока")
     start = max(0.0, float(start or 0))
-    common = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "4"]
-    if streams.get("user_agent"):
-        common += ["-user_agent", streams["user_agent"]]
-    if streams.get("referer"):
-        common += ["-referer", streams["referer"]]
-    if http_proxy:
-        common += ["-http_proxy", http_proxy]
+    vurl, aurl = streams["video"], streams.get("audio")
+    if local:
+        if not all(str(u).startswith("http://127.0.0.1:") for u in local.values()):
+            raise PlayerError("Небезопасный локальный адрес")
+        vurl, aurl = local["video"], (local.get("audio") if aurl else None)
+        common = ["-multiple_requests", "1", "-probesize", "1500000", "-analyzeduration", "1500000"]
+    else:
+        common = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "4"]
+        if streams.get("user_agent"):
+            common += ["-user_agent", streams["user_agent"]]
+        if streams.get("referer"):
+            common += ["-referer", streams["referer"]]
+        if http_proxy:
+            common += ["-http_proxy", http_proxy]
     seek = ["-ss", f"{start:.2f}"] if start > 0 else []
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
-    cmd += common + seek + ["-i", streams["video"]]
-    if streams.get("audio"):
+    cmd += common + seek + ["-i", vurl]
+    if aurl:
         if not validate.is_stream_url(streams["audio"], streams.get("source", "yt")):
             raise PlayerError("Небезопасный адрес звука")
-        cmd += common + seek + ["-i", streams["audio"], "-map", "0:v:0", "-map", "1:a:0"]
+        cmd += common + seek + ["-i", aurl, "-map", "0:v:0", "-map", "1:a:0"]
     else:
         cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
     cmd += ["-c", "copy", "-sn", "-dn"]

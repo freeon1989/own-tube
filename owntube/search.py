@@ -205,19 +205,56 @@ ACCOUNT_FEEDS = {
     "recommended": "https://www.youtube.com/",
 }
 PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{2,64}$")
+RELOGIN = "Войдите заново: сессия Google истекла или YouTube её не принял (Настройки → Аккаунты → Google → «Войти»)."
+_AUTH_HINTS = re.compile(r"log(ged)?[ -]?in|sign[ -]?in|cookies|authenticat|account|does not exist|private|не вошли|confirm you", re.I)
 
 
-def account_feed(kind: str, arg, route: Route, limit: int = 60) -> dict:
-    if kind in ACCOUNT_FEEDS:
-        return {"items": _flat(ACCOUNT_FEEDS[kind], route, limit)}
+class AccountError(ValueError):
+    """Лента аккаунта недоступна; текст можно показать пользователю (и он подсказывает, что делать)."""
+
+    def __init__(self, message: str, relogin: bool = False):
+        super().__init__(message)
+        self.relogin = relogin
+
+
+def account_items(kind: str, route: Route, limit: int, arg=None) -> list[dict]:
+    """Список из аккаунта Google: kind — recommended | subs | history | later | liked | playlist (arg — id плейлиста).
+    Ошибки входа превращаются в AccountError с понятным текстом; cookies в сообщения не попадают."""
+    import yt_dlp
+
     if kind == "playlist":
         if not isinstance(arg, str) or not PLAYLIST_ID_RE.fullmatch(arg):
             raise ValueError("Некорректный плейлист")
-        return {"items": _flat(f"https://www.youtube.com/playlist?list={arg}", route, 200)}
+        url = f"https://www.youtube.com/playlist?list={arg}"
+    elif kind in ACCOUNT_FEEDS:
+        url = ACCOUNT_FEEDS[kind]
+    else:
+        raise ValueError("Неизвестная лента аккаунта")
+    try:
+        items = _flat(url, route, max(1, min(int(limit), 300)))
+    except yt_dlp.utils.DownloadError as exc:
+        text = validate.redact(str(exc))
+        if _AUTH_HINTS.search(text):
+            raise AccountError(RELOGIN, True) from exc
+        raise AccountError("Лента аккаунта не загрузилась: " + text.replace("ERROR: ", "")[:200]) from exc
+    return items
+
+
+def account_feed(kind: str, arg, route: Route, limit: int = 60) -> dict:
+    if kind in ACCOUNT_FEEDS or kind == "playlist":
+        return {"items": account_items(kind, route, 200 if kind == "playlist" else limit, arg)}
     if kind == "playlists":
+        import yt_dlp
+
         opts = ytdl.base_options(route, extract_flat=True, playlistend=100, noplaylist=False)
-        with ytdl.YDL(opts) as ydl:
-            info = ydl.extract_info("https://www.youtube.com/feed/playlists", download=False)
+        try:
+            with ytdl.YDL(opts) as ydl:
+                info = ydl.extract_info("https://www.youtube.com/feed/playlists", download=False)
+        except yt_dlp.utils.DownloadError as exc:
+            text = validate.redact(str(exc))
+            if _AUTH_HINTS.search(text):
+                raise AccountError(RELOGIN, True) from exc
+            raise AccountError("Плейлисты аккаунта не загрузились: " + text.replace("ERROR: ", "")[:200]) from exc
         out = []
         for e in (info or {}).get("entries") or []:
             if not isinstance(e, dict):

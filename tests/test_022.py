@@ -288,8 +288,9 @@ def test_video_check_fetches_real_bytes_through_proxy(tmp_path, socks):
     out = diagnostics.run(good, lambda q, route, n: [{"id": "dQw4w9WgXcQ"}], lambda route: streams, lambda st: 70000)
     names = [s["name"] for s in out["steps"]]
     assert out["ok"], out
-    assert names[-3:] == ["Проверка видео: адрес потока", "Проверка видео: первые байты потока", "Проверка видео: встроенный плеер"]
-    detail = out["steps"][-2]["detail"]
+    assert names[-4:] == ["Проверка видео: адрес потока", "Проверка видео: первые байты потока", "Скорость видео",
+                          "Проверка видео: встроенный плеер"]
+    detail = out["steps"][-3]["detail"]
     assert "rr1.googlevideo.com" in detail and "HTTP 206" in detail and "IPv6" in detail and "ATYP 3" in detail
     assert "2001" not in json.dumps(out) and "videoplayback" not in json.dumps(out)  # без адресов и IP в журнале
     assert ("rr1.googlevideo.com", 443) in socks.targets

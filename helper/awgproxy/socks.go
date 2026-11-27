@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -135,10 +136,19 @@ func (s *Socks) handle(c net.Conn) {
 	reply(c, 0)
 	_ = c.SetDeadline(time.Time{})
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(up, c); closeWrite(up); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(c, up); closeWrite(c); done <- struct{}{} }()
+	go func() { pipe(up, c); closeWrite(up); done <- struct{}{} }()
+	go func() { pipe(c, up); closeWrite(c); done <- struct{}{} }()
 	<-done
 	<-done
+}
+
+// pipeBuf — буфер копирования побольше обычных 32 КБ: видео идёт крупными кусками, меньше системных вызовов на каждый поток.
+var pipeBuf = sync.Pool{New: func() any { b := make([]byte, 256<<10); return &b }}
+
+func pipe(dst, src net.Conn) {
+	bp := pipeBuf.Get().(*[]byte)
+	defer pipeBuf.Put(bp)
+	_, _ = io.CopyBuffer(struct{ io.Writer }{dst}, struct{ io.Reader }{src}, *bp)
 }
 
 type writeCloser interface{ CloseWrite() error }

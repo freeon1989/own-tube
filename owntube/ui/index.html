@@ -11,6 +11,7 @@
 <body>
 <svg class="defs" width="0" height="0" aria-hidden="true">
  <defs>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5m6-6-6 6 6 6"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11 12 3l9 8M5 10v10h5v-6h4v6h5V10"/></symbol>
   <symbol id="i-shorts" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="3"/><path d="m10.5 9.5 4 2.5-4 2.5z"/></symbol>
   <symbol id="i-subs" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="12" rx="2"/><path d="M6 4h12M8 1.5h8"/><path d="m10.5 11.5 3.5 2.5-3.5 2.5z"/></symbol>
@@ -56,6 +57,7 @@
 
   <main class="main" id="content">
     <header class="bar">
+      <button type="button" class="ghost back-btn" id="backBtn" title="Назад (Alt+←, Backspace)" aria-label="Назад"><svg class="ico"><use href="#i-back"/></svg></button>
       <div class="src-tabs" role="tablist" aria-label="Источник">
         <button type="button" role="tab" id="tabYt" aria-selected="true">YouTube</button>
         <button type="button" role="tab" id="tabVk" aria-selected="false">VK Видео</button>

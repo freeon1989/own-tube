@@ -448,3 +448,12 @@ body.fullplayer .player{flex:1;aspect-ratio:auto}
 
 /* ссылка и конфигурация VPN содержат ключи: поле скрыто, пока не нажато «Показать» */
 .vpn-input:not(.shown) { -webkit-text-security: disc; text-security: disc; }
+
+.back-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;flex:none}
+.back-btn:disabled{opacity:.35;cursor:default}
+.back-btn .ico{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.watch-back{margin:0 0 8px}
+.p-bar .p-buf{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(255,255,255,.28)}
+.acct-hint{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 14px;padding:10px 14px;border-radius:var(--r-md);background:var(--surface-2);border:1px solid var(--line);color:var(--text);font-size:13px}
+.acct-wrap:empty{display:none}
+.vk-tabs{margin:12px 0}

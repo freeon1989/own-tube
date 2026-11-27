@@ -27,7 +27,12 @@ OBF = {"jc": "4", "jmin": "40", "jmax": "70", "s1": "15", "s2": "18", "s3": "20"
 
 
 def sh(*cmd, check=True):
-    return subprocess.run(list(cmd), check=check, capture_output=True, text=True)
+    try:
+        return subprocess.run(list(cmd), check=check, capture_output=True, text=True)
+    except FileNotFoundError:  # нет iptables-legacy: для замеров до самой этой машины NAT наружу не нужен
+        if check:
+            raise
+        return subprocess.CompletedProcess(list(cmd), 127, "", "нет такой команды")
 
 
 def keypair(keys_bin):

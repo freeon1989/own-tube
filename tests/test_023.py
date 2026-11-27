@@ -258,7 +258,7 @@ def test_media_refreshes_stream_on_network_failure(tmp_path):
     fake.write_text("#!/bin/sh\nif echo \"$@\" | grep -q BAD; then echo 'Server returned 502 Bad Gateway' >&2; exit 1; fi\n"
                     "head -c 200000 /dev/zero\n")
     fake.chmod(0o755)
-    m = MediaServer(lambda: Route(), lambda: str(fake))
+    m = MediaServer(lambda: Route(), lambda: str(fake), use_sources=False)  # прежний путь: ffmpeg сам открывает адрес
     try:
         sid = m.add_session({"video": "https://rr1.googlevideo.com/BAD", "audio": None, "container": "webm"},
                             refresh=lambda: {"video": "https://rr1.googlevideo.com/GOOD", "audio": None, "container": "webm"})
@@ -305,6 +305,7 @@ def test_watch_in_shorts_mode_keeps_other_sessions(tmp_path, monkeypatch):
 
 def test_prefetch_resolves_once(tmp_path, monkeypatch):
     api = _api(tmp_path)
+    api.save_settings({"fast_start": False})  # иначе рядом готовятся и адреса выбранного качества (см. test_033)
     n = {"c": 0}
 
     def resolve(*a, **k):

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from urllib.parse import parse_qs
 
-from . import bridge, httpc, validate
+from . import bridge, httpc, streamsrc, validate
 from .network import Route
 
 TEST_THUMB = "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"
@@ -55,6 +55,71 @@ def probe_stream(st: dict, route: Route) -> str:
     again = f", с попытки {tries}" if tries > 1 else ""
     return (f"{host}: HTTP {status}, получено {len(data) // 1024} КБ за {ms} мс{again}; "
             f"соединение с прокси: {atyp}; адрес потока выдан для {fam}")
+
+
+LEVELS = ((25, "4K"), (10, "1440p"), (6, "1080p"), (3.5, "720p"), (1.6, "480p"), (0.9, "360p"))
+
+
+def _need_note(mbit: float) -> str:
+    for need, name in LEVELS:
+        if mbit >= need * 1.5:
+            return f"хватит для {name}" + (" и ниже" if name != "360p" else "")
+    return "не хватает даже для 360p без остановок"
+
+
+def _one_stream(st: dict, route: Route, secs: float, limit: int) -> tuple[float, int]:
+    """Как читал ffmpeg раньше: один длинный запрос на одном соединении. (Мбит/с, байт)."""
+    hdr = {"Range": "bytes=0-", "Accept": "*/*"}
+    hdr.update(streamsrc.source_headers(st))
+    t0 = time.monotonic()
+    resp = httpc.open_url("GET", st["video"], route, hdr, timeout=20)
+    got = 0
+    try:
+        if resp.status not in (200, 206):
+            raise ValueError(f"HTTP {resp.status}")
+        while time.monotonic() - t0 < secs and got < limit:
+            b = resp.read(65536)
+            if not b:
+                break
+            got += len(b)
+    finally:
+        resp.close()
+        conn = getattr(resp, "_owntube_conn", None)
+        if conn is not None:
+            conn.close()
+    return got * 8 / max(time.monotonic() - t0, 1e-6) / 1e6, got
+
+
+def _parallel(st: dict, route: Route, secs: float, limit: int, parallel: int = 6) -> tuple[float, int]:
+    """Как читает плеер теперь: короткие запросы по 0,5 МБ, несколько одновременно. (Мбит/с, байт)."""
+    src = streamsrc.Source(st["video"], lambda: route, streamsrc.source_headers(st), lambda: 16 * streamsrc.MB, "test",
+                           parallel=parallel)
+    t0 = time.monotonic()
+    pos = got = 0
+    try:
+        total = src.size(20)
+        while time.monotonic() - t0 < secs and got < limit and pos < total:
+            data = src.read(pos, 256 * 1024, timeout=20)
+            if not data:
+                break
+            pos += len(data)
+            got += len(data)
+    finally:
+        src.close()
+    return got * 8 / max(time.monotonic() - t0, 1e-6) / 1e6, got
+
+
+def video_speed(st: dict, route: Route, secs: float = 6.0, limit: int = 24 * 1024 * 1024) -> str:
+    """Скорость загрузки настоящего видео через текущий маршрут: один поток и несколько параллельных."""
+    host = urlsplit(st["video"]).hostname or "?"
+    one, n1 = _one_stream(st, route, secs, limit)
+    many, n2 = _parallel(st, route, secs, limit)
+    if n1 < 64 * 1024 and n2 < 64 * 1024:
+        raise ValueError(f"{host}: данные не пришли")
+    best = max(one, many)
+    gain = f", параллельная загрузка быстрее в {many / one:.1f} раза" if one > 0.1 and many > one * 1.25 else ""
+    return (f"{host}: один поток {one:.1f} Мбит/с, несколько запросов сразу {many:.1f} Мбит/с{gain}. "
+            f"Через «{route.label}» {_need_note(best)}.")
 
 
 def run(route: Route, search_fn=None, video_fn=None, pipe_fn=None) -> dict:
@@ -123,7 +188,11 @@ def run(route: Route, search_fn=None, video_fn=None, pipe_fn=None) -> dict:
                         return alt + " — основной формат (VP9) ответил 403, запасной H.264 открылся: плеер переключится сам"
                 steps.append(_step("Проверка видео: первые байты потока", fetch))
 
-                if pipe_fn is not None and steps[-1]["ok"]:
+                fetch_ok = steps[-1]["ok"]
+                if fetch_ok:
+                    steps.append(_step("Скорость видео", lambda: video_speed(holder["streams"], route)))
+
+                if pipe_fn is not None and fetch_ok:
                     def pipe():
                         t = time.monotonic()
                         n = pipe_fn(holder["streams"])

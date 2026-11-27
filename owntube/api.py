@@ -78,6 +78,7 @@ class Api:
         self._installer = voice.Installer()
         self._stt_lock = threading.Lock()
         self._prefetching: set = set()
+        self._playback: list[dict] = []
         self._update_job = updater.Job()
         self._update_info = None
 
@@ -85,7 +86,8 @@ class Api:
         with self._lock:
             if self._media is None:
                 from .media import MediaServer
-                self._media = MediaServer(self._routes.current, lambda: find_tool("ffmpeg"))
+                self._media = MediaServer(self._routes.current, lambda: find_tool("ffmpeg"),
+                                          lambda: self._store.value.prefetch_mb)
             return self._media
 
     def _attach(self, window) -> None:
@@ -438,16 +440,21 @@ class Api:
             return items, nxt, {}
         return self._cached_list("search:" + q.lower(), mode, produce_yt)
 
+    def _google_in(self) -> bool:
+        return bool(self._store.value.account_feeds and self._accounts.status()["google"]["signed_in"])
+
     @safe
     def feed(self, kind, arg=None, more=None, mode="fresh"):
         route = self._routes.current()
         mode = "cache" if mode == "cache" else "fresh"
-        if kind not in ("home", "subs", "shorts", "category", "channel"):
+        if kind not in ("home", "subs", "shorts", "category", "channel", "acct"):
             raise ValueError("Неизвестный раздел")
         cur = lists.clean_cursor(more)
         if cur:
             items, nxt = lists.more(cur, route)
             return {"items": items, "more": nxt}
+        if kind == "acct" or (kind in ("home", "subs") and self._google_in()):
+            return self._account_feed_list(kind, arg, route, mode)
         subs = {s["channel_id"]: s["title"] for s in self._db.subscriptions()} if kind in ("home", "subs") else None
         sig = str(abs(hash(tuple(sorted(subs)))) % 10**8) if subs else ""
         key = f"{kind}:{arg or ''}:{sig}"
@@ -456,6 +463,62 @@ class Api:
             items, nxt, origin = lists.first(kind, arg, route, subs)
             return items, nxt, ({"from": origin} if origin else {})
         return self._cached_list(key, mode, produce)
+
+    def _account_feed_list(self, kind, arg, route, mode):
+        """Главная и Подписки из аккаунта Google (после входа), а также История, «Смотреть позже», «Понравившиеся», плейлисты.
+        Главная и Подписки при сбое аккаунта возвращаются к обычным спискам и приносят подсказку «Войдите заново»."""
+        if kind == "acct":
+            sub = str(arg or "")
+            pid = None
+            if sub.startswith("playlist:"):
+                sub, pid = "playlist", sub.split(":", 1)[1]
+            if sub not in ("history", "later", "liked", "playlist", "subs", "recommended"):
+                raise ValueError("Неизвестная лента аккаунта")
+            if not self._accounts.status()["google"]["signed_in"]:
+                raise ValueError("Сначала войдите в Google (Настройки → Аккаунты)")
+        else:
+            sub, pid = ("recommended" if kind == "home" else "subs"), None
+        key = f"acct:{sub}:{pid or ''}"
+
+        def produce():
+            items, nxt = lists.account_page(sub, pid, route, 0, force=True)
+            if kind != "acct" and not items:
+                raise yt.AccountError("Лента аккаунта пуста. Если вы недавно выходили из Google или меняли пароль — "
+                                      "войдите заново (Настройки → Аккаунты).", True)
+            return items, nxt, {"from": "account"}
+        try:
+            return self._cached_list(key, mode, produce)
+        except yt.AccountError as exc:
+            log.info("Лента аккаунта (%s) недоступна: %s", sub, validate.redact(str(exc))[:160])
+            if kind == "acct":
+                raise
+            subs = {s["channel_id"]: s["title"] for s in self._db.subscriptions()} if self._db.subscriptions() else None
+            fb_key = f"{kind}:{arg or ''}:fb"
+            note, relogin = str(exc), exc.relogin
+
+            def produce_fb():
+                items, nxt, origin = lists.first(kind, arg, route, subs)
+                return items, nxt, {"from": origin or "", "account_error": note, "relogin": relogin}
+            return self._cached_list(fb_key, mode, produce_fb)
+
+    @safe
+    def vk_feed(self, kind, more=None, mode="fresh"):
+        """Лента VK вошедшего пользователя: рекомендации, подписки, «Мои видео» (то, что отдаёт vkvideo.ru)."""
+        kind = validate.clean_choice(kind, ("recommended", "subs", "my"), "лента VK")
+        route = self._routes.current()
+        cookie = self._accounts.cookie_header("vk", "login.vk.com")
+        cur = lists.clean_cursor(more)
+        if cur:
+            if cur["k"] != "vk":
+                raise ValueError("Некорректное продолжение списка")
+            return vk.search("", route, cookie, adult=False, cursor=cur)
+        if not self._accounts.status()["vk"]["signed_in"]:
+            raise ValueError("Сначала войдите в VK (Настройки → Аккаунты)")
+
+        def produce():
+            res = vk.feed(kind, route, cookie)
+            return res["items"], res.get("more"), {"signed_in": True, "title": res.get("title") or ""}
+        return self._cached_list("vkfeed:" + kind, "cache" if mode == "cache" else "fresh", produce)
 
     @safe
     def more(self, cursor, source="yt", query=""):
@@ -615,25 +678,43 @@ class Api:
             return "720"  # вертикальным роликам больше не нужно, зато открываются заметно быстрее
         return q
 
+    def _start_quality(self, target: str, v: dict, route, codec: str, short: bool, allow_fast: bool) -> str:
+        """Быстрый старт: если выбрано качество выше «стартового», начинаем со стартового, а потом поднимаем.
+        Не нужно, если потоки выбранного качества уже разобраны (кэш): тогда старт и так мгновенный."""
+        s = self._store.value
+        if short or not allow_fast or not s.fast_start or target in ("360", "480", "720") and int(target) <= int(s.start_quality):
+            return target
+        if self._streamcache.peek((v["source"], v["id"], target, codec, route.proxy or "", route.user or "", False)):
+            return target
+        return s.start_quality
+
     @safe
-    def watch(self, item, quality=None, short=False):
+    def watch(self, item, quality=None, short=False, fast=True, upgrade_from=None, start=0):
         """Видео внутри окна: yt-dlp выбирает потоки, ffmpeg без перекодирования отдаёт их в <video>.
-        short=True — режим Shorts: сеансы не сбрасываются, соседние ролики могут быть подготовлены заранее."""
+        short=True — режим Shorts: сеансы не сбрасываются, соседние ролики могут быть подготовлены заранее.
+        fast=True — быстрый старт с качества пониже; интерфейс потом просит то же с upgrade_from=<сеанс> и start=<позиция>:
+        новый сеанс создаётся рядом со старым, старый остаётся играть, пока интерфейс не переключится."""
         v = clean_item(item)
         s = self._store.value
         if not find_tool("ffmpeg"):
             raise ValueError("Для встроенного плеера нужен ffmpeg (папка tools рядом с программой)")
         short = bool(short)
-        q = self._effective_quality(quality, short)
+        upgrade = isinstance(upgrade_from, str) and bool(upgrade_from)
+        target = self._effective_quality(quality, short)
         route = self._routes.current()
+        q = target if upgrade else self._start_quality(target, v, route, s.codec, short, bool(fast))
         t0 = time.monotonic()
         streams, cached = self._streams(v, q, route, s.codec)
         if streams.get("live"):
             raise ValueError("Прямые эфиры пока открываются только в отдельном окне (mpv)")
-        log.info("Потоки для %s: %s, %.1f с, %s", v["source"], "из кэша" if cached else "получены",
-                 time.monotonic() - t0, f"{streams.get('height') or '?'}p {streams.get('container')}")
+        log.info("Потоки для %s: %s, %.1f с, %s%s", v["source"], "из кэша" if cached else "получены",
+                 time.monotonic() - t0, f"{streams.get('height') or '?'}p {streams.get('container')}",
+                 f" (быстрый старт, цель {target})" if q != target else (" (повышение качества)" if upgrade else ""))
+        if q != target:  # пока играет низкое качество, готовим адреса выбранного
+            threading.Thread(target=self._prefetch_target, args=(v, target, route, s.codec), daemon=True,
+                             name="owntube-upgrade").start()
         segs = []
-        if v["source"] == "yt" and s.sponsorblock and not short:
+        if v["source"] == "yt" and s.sponsorblock and not short and not upgrade:
             try:
                 segs = sponsorblock.segments(v["id"], s.sb_categories, route)
             except Exception:
@@ -645,18 +726,57 @@ class Api:
             cur = self._routes.current()
             return self._streams(v, q, cur, alt, fresh=True, ipv4=cur.direct)[0]
 
-        sid = media.add_session(streams, refresh=refresh, exclusive=not short)
+        sid = media.add_session(streams, refresh=refresh, exclusive=not short and not upgrade)
+        pos = float(start) if isinstance(start, (int, float)) and not isinstance(start, bool) and 0 <= start < 86400 * 2 else 0.0
         with self._lock:
-            if not short:
+            if not short and not upgrade:
                 self._watch = {"sid": sid, "item": v}
         title = streams.get("title") or v["title"]
-        self._db.add_history({**item, **v, "title": title})
-        return {"sid": sid, "url": media.video_url(sid, 0), "base": media.base, "title": title,
+        if not upgrade:
+            self._db.add_history({**item, **v, "title": title})
+        return {"sid": sid, "url": media.video_url(sid, pos), "base": media.base, "title": title,
                 "channel": streams.get("channel") or v.get("channel") or "",
                 "channel_id": streams.get("channel_id") or v.get("channel_id") or "",
                 "duration": streams.get("duration") or 0, "height": streams.get("height") or 0,
                 "container": streams.get("container"), "segments": [[a, b] for a, b in segs],
-                "quality": q, "cached": cached}
+                "quality": q, "target": target, "upgrade": q != target, "cached": cached}
+
+    def _prefetch_target(self, v: dict, target: str, route, codec: str) -> None:
+        try:
+            self._streams(v, target, route, codec)
+        except Exception as exc:
+            log.debug("Подготовка качества %s не удалась: %s", target, validate.redact(str(exc))[:100])
+
+    @safe
+    def commit_upgrade(self, new_sid, old_sid):
+        """Интерфейс переключился на новый сеанс: он становится текущим, старый закрывается."""
+        if not (isinstance(new_sid, str) and isinstance(old_sid, str) and new_sid and old_sid):
+            raise ValueError("Некорректный сеанс")
+        media = self._media_server()  # берёт self._lock сам: под замком не вызываем
+        with self._lock:
+            ok = self._watch.get("sid") == old_sid
+            if ok:
+                self._watch = {**self._watch, "sid": new_sid}
+        if not ok:
+            media.drop_session(new_sid)
+            raise ValueError("Видео уже закрыто")
+        media.drop_session(old_sid)
+        return {}
+
+    @safe
+    def playback_stats(self, stats):
+        """Итог просмотра от плеера (только в локальный журнал): время до первого кадра, буферизации. Ничего не отправляется."""
+        if not isinstance(stats, dict):
+            raise ValueError("Ожидался объект")
+        num = lambda k, hi: min(hi, max(0, int(stats.get(k) or 0))) if isinstance(stats.get(k), (int, float)) and not isinstance(stats.get(k), bool) else 0  # noqa: E731
+        rec = {"ttff_ms": num("ttff_ms", 600000), "rebuffers": num("rebuffers", 10000), "stall_ms": num("stall_ms", 36000000),
+               "height": num("height", 4320), "upgraded_ms": num("upgraded_ms", 36000000), "played_s": num("played_s", 86400 * 2)}
+        self._playback.append(rec)
+        del self._playback[:-30]
+        log.info("Просмотр: первый кадр через %d мс, буферизаций %d (%d мс), %dp%s, смотрел %d с", rec["ttff_ms"], rec["rebuffers"],
+                 rec["stall_ms"], rec["height"], f", повышение через {rec['upgraded_ms']} мс" if rec["upgraded_ms"] else "",
+                 rec["played_s"])
+        return {}
 
     @safe
     def prefetch(self, item, short=False):
@@ -664,8 +784,8 @@ class Api:
         v = clean_item(item)
         if v["source"] not in ("yt", "vk") or not find_tool("ffmpeg"):
             return {"started": False}
-        q = self._effective_quality(None, bool(short))
         route = self._routes.current()
+        q = self._start_quality(self._effective_quality(None, bool(short)), v, route, self._store.value.codec, bool(short), True)
         key = (v["source"], v["id"])
         with self._lock:
             if key in self._prefetching or len(self._prefetching) >= 3:
@@ -674,7 +794,9 @@ class Api:
 
         def run():
             try:
-                self._streams(v, q, route, self._store.value.codec)
+                streams, _ = self._streams(v, q, route, self._store.value.codec)
+                if not streams.get("live"):
+                    self._media_server().prepare(streams)  # первые мегабайты уже качаются: старт будет почти мгновенным
             except Exception as exc:
                 log.debug("Подготовка %s не удалась: %s", v["id"], validate.redact(str(exc))[:100])
             finally:
@@ -869,6 +991,10 @@ class Api:
     @safe
     def account_status(self):
         st = self._accounts.status()
+        sig = (st["google"]["signed_in"], st["vk"]["signed_in"])
+        if getattr(self, "_acct_sig", None) not in (None, sig):  # вошли или вышли (в окне входа): старые ленты не показываем
+            self._accounts_changed()
+        self._acct_sig = sig
         return {"accounts": st}
 
     @safe
@@ -879,10 +1005,15 @@ class Api:
         self._accounts.start_login(kind)
         return {"accounts": self._accounts.status()}
 
+    def _accounts_changed(self) -> None:
+        lists.account_forget()
+        self._cache.clear()
+
     @safe
     def account_logout(self, kind):
         kind = validate.clean_choice(kind, acc_mod.KINDS, "аккаунт")
         self._accounts.logout(kind)
+        self._accounts_changed()
         return {"accounts": self._accounts.status()}
 
     @safe
@@ -894,6 +1025,7 @@ class Api:
         if p.stat().st_size > 2 * 1024 * 1024:
             raise ValueError("Файл слишком большой для cookies.txt")
         n = self._accounts.import_text(kind, p.read_text(encoding="utf-8", errors="replace"))
+        self._accounts_changed()
         return {"count": n, "accounts": self._accounts.status()}
 
     @safe

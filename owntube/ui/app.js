@@ -66,6 +66,8 @@
   let acct = { google: {}, vk: {} };
   let watchCleanup = null;
   const prefetched = new Set();   // ролики, для которых поток уже разбирается заранее
+  const navStack = [];          // стек переходов для «Назад»: экран, аргумент, позиция прокрутки и уже загруженный список
+  let pendingRestore = null;    // снимок списка, который надо вернуть без запроса в сеть
   let activePager = null;       // текущий список с «Показать ещё» (для действия помощницы [[more]])
   function img(url) { return url && MEDIA ? MEDIA + "/img?u=" + encodeURIComponent(url) : ""; }
   function ytThumb(id) { return "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg"; }
@@ -363,13 +365,18 @@
         h("span", {}, g.signed_in ? "подписки и история из YouTube" : "Google и VK — по желанию")));
   }
   async function refreshAccounts() {
+    const before = (acct.google && acct.google.signed_in ? "g" : "") + (acct.vk && acct.vk.signed_in ? "v" : "");
     const r = await call("account_status");
     if (r.ok) acct = r.accounts;
-    if (acct.google && acct.google.signed_in && !acct.google.name) {
-      const p = await call("account_profile");
-      if (p.ok && p.profile) { acct.google.name = p.profile.name; acct.google.avatar = p.profile.avatar; }
-    }
+    const after = (acct.google && acct.google.signed_in ? "g" : "") + (acct.vk && acct.vk.signed_in ? "v" : "");
     buildSide();
+    if (acct.google && acct.google.signed_in && !acct.google.name) {   // имя и аватар — отдельным запросом, список не ждёт
+      call("account_profile").then((p) => {
+        if (p.ok && p.profile && acct.google) { acct.google.name = p.profile.name; acct.google.avatar = p.profile.avatar; buildSide(); }
+      });
+    }
+    // вошли или вышли: главная, подписки, история и т. д. теперь из другого источника
+    if (before !== after && ["home", "subs", "history", "later", "favorite", "playlists", "vk"].includes(current.view)) reload();
     return acct;
   }
   function markNav() {
@@ -475,12 +482,12 @@
   async function showWatch(item) {
     if (!item) return go("home");
     const my = ++seq;
-    const vid = h("video", { class: "vid", autoplay: true, playsinline: true, preload: "auto" });
+    let vid = h("video", { class: "vid", autoplay: true, playsinline: true, preload: "auto" });
     const stage = h("div", { class: "player" }, vid, h("div", { class: "p-msg", id: "pMsg" }, "Загружаю видео…"));
     const ttl = h("h1", { class: "w-title" }, item.title || "Видео");
     const chan = h("div", { class: "w-chan" });
     const related = h("div", { class: "w-related" }, h("p", { class: "note" }, "Похожие загружаются…"));
-    const bar = h("div", { class: "p-bar", role: "slider", "aria-label": "Позиция", tabindex: "0" }, h("i", { class: "p-done" }), h("i", { class: "p-segs" }));
+    const bar = h("div", { class: "p-bar", role: "slider", "aria-label": "Позиция", tabindex: "0" }, h("i", { class: "p-buf" }), h("i", { class: "p-done" }), h("i", { class: "p-segs" }));
     const tm = h("span", { class: "p-time" }, "0:00 / 0:00");
     const playBtn = h("button", { type: "button", class: "p-btn", "aria-label": "Пауза" }, "❚❚");
     const vol = h("input", { type: "range", min: "0", max: "1", step: "0.05", value: String(S.volume == null ? 1 : 1), "aria-label": "Громкость" });
@@ -489,10 +496,13 @@
     const fsBtn = h("button", { type: "button", class: "p-btn", "aria-label": "Во весь экран", title: "Во весь экран (F)" }, "⛶");
     const extBtn = h("button", { type: "button", class: "ghost" }, ic("link"), " В отдельном окне (mpv)");
     const controls = h("div", { class: "p-ctl" }, playBtn, tm, bar, vol, qSel, fsBtn);
-    const wrap = h("div", { class: "watch" }, h("div", { class: "w-main" }, h("div", { class: "p-wrap" }, stage, controls), ttl, h("div", { class: "w-row" }, chan, h("span", { class: "sp" }), extBtn)), h("aside", { class: "w-side" }, h("h2", { class: "h1" }, h("small", {}, "Похожие")), related));
+    const backB = h("button", { type: "button", class: "ghost back-btn watch-back", title: "Назад к списку (Alt+←)", onclick: () => goBack() }, ic("back"), " Назад");
+    const wrap = h("div", { class: "watch" }, h("div", { class: "w-main" }, backB, h("div", { class: "p-wrap" }, stage, controls), ttl, h("div", { class: "w-row" }, chan, h("span", { class: "sp" }), extBtn)), h("aside", { class: "w-side" }, h("h2", { class: "h1" }, h("small", {}, "Похожие")), related));
     view(wrap);
     status("Открываю «" + (item.title || "") + "»…", "busy");
     let info = null, offset = 0, alive = true, skipped = new Set(), full = false;
+    let seekGen = 0, upgrading = false, upTimer = null;
+    const pm = { t0: 0, ttff: 0, rebuffers: 0, stall: 0, waitAt: 0, upgraded: 0, sent: false };  // замеры для журнала (только локально)
     const msg = (t) => { const m = $("pMsg"); if (m) { m.textContent = t || ""; m.hidden = !t; } };
     const now = () => offset + (vid.currentTime || 0);
     async function seek(t) {
@@ -500,18 +510,28 @@
       t = Math.max(0, Math.min(t, (info.duration || 1e9) - 1));
       const r = await call("seek_url", info.sid, t);
       if (!r.ok || !alive) return;
-      offset = t; msg("…");
+      seekGen++; offset = t; msg("…"); pm.seeking = true;
       vid.src = r.url; vid.play().catch(() => {});
     }
-    async function open(q) {
+    function flushStats() {
+      if (pm.sent || !pm.ttff) return;
+      pm.sent = true;
+      call("playback_stats", { ttff_ms: pm.ttff, rebuffers: pm.rebuffers, stall_ms: Math.round(pm.stall), height: info ? info.height : 0,
+        upgraded_ms: Math.round(pm.upgraded), played_s: Math.round(now()) });
+    }
+    async function open(q, fast) {
+      flushStats();
+      if (upTimer) { clearInterval(upTimer); upTimer = null; }
+      upgrading = false;
       const pos = info ? now() : 0;
-      const r = await call("watch", item, q);
+      Object.assign(pm, { t0: performance.now(), ttff: 0, rebuffers: 0, stall: 0, waitAt: 0, upgraded: 0, sent: false });
+      const r = await call("watch", item, q, false, !!fast);
       if (my !== seq || !alive) return;
       if (!r.ok) { status(r.error, "err"); msg(r.error + " — можно открыть в отдельном окне (mpv)."); act("wow", "!"); return; }
-      info = r; offset = 0; skipped = new Set();
+      info = r; offset = 0; skipped = new Set(); seekGen++;
       ttl.textContent = r.title; current.title = r.title;
       chan.replaceChildren(...[r.channel_id ? h("button", { class: "chan", type: "button", onclick: () => go("channel", r.channel_id, r.channel) }, r.channel) : (r.channel || ""),
-        r.height ? h("span", { class: "pill" }, r.height + "p · " + String(r.container || "").toUpperCase()) : null,
+        r.height ? h("span", { class: "pill q" }, r.height + "p · " + String(r.container || "").toUpperCase()) : null,
         r.segments.length ? h("span", { class: "pill" }, "SponsorBlock: " + r.segments.length) : null].filter((x) => x));
       const segs = bar.querySelector(".p-segs"); segs.replaceChildren();
       if (r.duration) for (const [a, b] of r.segments) { const i = h("b"); i.style.left = (a / r.duration * 100) + "%"; i.style.width = ((b - a) / r.duration * 100) + "%"; segs.append(i); }
@@ -519,32 +539,104 @@
       vid.play().catch(() => {});
       status(""); act("joy", "♪"); refreshCounts();
       if (pos > 1) seek(pos);
+      if (r.upgrade) watchUpgrade(r);
     }
-    vid.addEventListener("playing", () => { msg(""); playBtn.textContent = "❚❚"; });
-    vid.addEventListener("pause", () => { playBtn.textContent = "▶"; });
-    vid.addEventListener("waiting", () => msg("Буферизация…"));
-    vid.addEventListener("error", () => { if (alive && info) msg("Встроенный плеер не смог показать это видео. Попробуйте другое качество или «В отдельном окне (mpv)»."); });
-    vid.addEventListener("timeupdate", () => {
-      const t = now(), d = info ? info.duration : 0;
-      tm.textContent = fmtTime(t) + " / " + fmtTime(d);
-      if (d) bar.querySelector(".p-done").style.width = Math.min(100, t / d * 100) + "%";
-      if (info && S.sponsorblock) for (const [a, b] of info.segments) {
-        const key = a + "-" + b;
-        if (t >= a && t < b - 0.5 && !skipped.has(key)) { skipped.add(key); status("SponsorBlock: пропущен отрезок " + fmtTime(a) + "–" + fmtTime(b)); seek(b); break; }
-      }
-    });
-    vid.addEventListener("ended", () => { playBtn.textContent = "▶"; });
+    function setPill() {
+      const p = chan.querySelector(".pill.q");
+      if (p && info) p.textContent = info.height + "p · " + String(info.container || "").toUpperCase();
+    }
+    /* Быстрый старт: играем низкое качество, а когда набран запас, незаметно переключаемся на выбранное:
+       второй <video> качает с текущего места, и когда он обгоняет проигрыватель на пару секунд, меняем их местами. */
+    function watchUpgrade(base) {
+      let waited = 0;
+      upTimer = setInterval(async () => {
+        if (!alive || info !== base) { clearInterval(upTimer); upTimer = null; return; }
+        waited += 0.5;
+        const b = vid.buffered, end = b.length ? b.end(b.length - 1) : 0;
+        const ahead = end - vid.currentTime;
+        if (vid.paused && waited < 20) return;
+        if (!(vid.currentTime > 2 && ahead >= 6) && waited < 25) return;   // запас набран (или пора пробовать в любом случае)
+        clearInterval(upTimer); upTimer = null;
+        if (upgrading) return;
+        upgrading = true;
+        const gen = seekGen, t0 = performance.now(), pos = now();
+        const r = await call("watch", item, base.target, false, false, base.sid, pos);
+        if (!r.ok) { upgrading = false; return; }
+        const drop = () => { upgrading = false; call("drop_watch", r.sid); };
+        if (!alive || info !== base || gen !== seekGen) return drop();
+        const nv = h("video", { class: "vid", playsinline: true, preload: "auto" });
+        nv.muted = true; nv.style.cssText = "position:absolute;inset:0;opacity:0;pointer-events:none";
+        stage.insertBefore(nv, vid.nextSibling);
+        nv.src = r.url; nv.play().catch(() => {});
+        const abort = () => { clearInterval(tk); nv.pause(); nv.removeAttribute("src"); nv.load(); nv.remove(); drop(); };
+        const tk = setInterval(() => {
+          if (!alive || info !== base || gen !== seekGen || performance.now() - t0 > 40000) return abort();
+          const cur = now() - pos, nb = nv.buffered, ne = nb.length ? nb.end(nb.length - 1) : 0;
+          if (nv.readyState < 3 || ne < cur + 3) return;
+          clearInterval(tk);
+          nv.currentTime = cur + 0.4;
+          nv.addEventListener("seeked", () => {
+            if (!alive || info !== base || gen !== seekGen) { nv.remove(); return drop(); }
+            const old = vid, wasPaused = old.paused;
+            nv.muted = old.muted; nv.volume = old.volume;
+            nv.style.cssText = ""; vid = nv; offset = pos; bindVideo(nv);
+            if (wasPaused) nv.pause(); else nv.play().catch(() => {});
+            old.pause(); old.removeAttribute("src"); old.load(); old.remove();
+            info = { ...base, sid: r.sid, height: r.height, quality: r.quality, upgrade: false, container: r.container };
+            pm.upgraded = performance.now() - pm.t0; upgrading = false; setPill();
+            call("commit_upgrade", r.sid, base.sid);
+            status("Качество поднято до " + r.height + "p");
+          }, { once: true });
+        }, 250);
+      }, 500);
+    }
+    function updateBuffered() {
+      const d = info ? info.duration : 0, bf = bar.querySelector(".p-buf");
+      if (!d || !bf) return;
+      const b = vid.buffered, t = vid.currentTime || 0;
+      let end = 0;
+      for (let i = 0; i < b.length; i++) if (b.start(i) <= t + 0.5 && b.end(i) >= t) end = b.end(i);
+      bf.style.width = Math.min(100, (offset + end) / d * 100) + "%";
+    }
+    function bindVideo(v) {
+      v.addEventListener("playing", () => {
+        msg(""); playBtn.textContent = "❚❚";
+        const t = performance.now();
+        if (!pm.ttff && pm.t0) pm.ttff = Math.round(t - pm.t0);
+        if (pm.waitAt) { pm.stall += t - pm.waitAt; pm.waitAt = 0; }
+        pm.seeking = false;
+      });
+      v.addEventListener("pause", () => { playBtn.textContent = "▶"; });
+      v.addEventListener("waiting", () => {
+        msg("Буферизация…");
+        if (pm.ttff && !pm.seeking && !pm.waitAt && !v.paused) { pm.rebuffers++; pm.waitAt = performance.now(); }
+      });
+      v.addEventListener("progress", updateBuffered);
+      v.addEventListener("error", () => { if (alive && info) msg("Встроенный плеер не смог показать это видео. Попробуйте другое качество или «В отдельном окне (mpv)»."); });
+      v.addEventListener("timeupdate", () => {
+        const t = now(), d = info ? info.duration : 0;
+        tm.textContent = fmtTime(t) + " / " + fmtTime(d);
+        if (d) bar.querySelector(".p-done").style.width = Math.min(100, t / d * 100) + "%";
+        updateBuffered();
+        if (info && S.sponsorblock) for (const [a, b] of info.segments) {
+          const key = a + "-" + b;
+          if (t >= a && t < b - 0.5 && !skipped.has(key)) { skipped.add(key); status("SponsorBlock: пропущен отрезок " + fmtTime(a) + "–" + fmtTime(b)); seek(b); break; }
+        }
+      });
+      v.addEventListener("ended", () => { playBtn.textContent = "▶"; });
+      v.addEventListener("click", () => playBtn.click());
+      v.addEventListener("dblclick", () => setFull(!full));
+    }
+    bindVideo(vid);
     playBtn.addEventListener("click", () => { if (vid.paused) vid.play().catch(() => {}); else vid.pause(); });
-    vid.addEventListener("click", () => playBtn.click());
     bar.addEventListener("click", (e) => { if (!info || !info.duration) return; const r = bar.getBoundingClientRect(); seek((e.clientX - r.left) / r.width * info.duration); });
     vol.addEventListener("input", () => { vid.volume = Number(vol.value); vid.muted = false; });
-    qSel.addEventListener("change", () => open(qSel.value));
+    qSel.addEventListener("change", () => open(qSel.value, false));
     function setFull(on) {
       full = on; document.body.classList.toggle("fullplayer", on);
       call("fullscreen", on);
     }
     fsBtn.addEventListener("click", () => setFull(!full));
-    vid.addEventListener("dblclick", () => setFull(!full));
     extBtn.addEventListener("click", () => { const t = now(); playExternal(item); msg("Играет в отдельном окне"); void t; });
     const keys = (e) => {
       if (["INPUT", "SELECT", "TEXTAREA"].includes((e.target.tagName || ""))) return;
@@ -552,18 +644,20 @@
       else if (e.key === "f") setFull(!full);
       else if (e.key === "Escape" && full) setFull(false);
       else if (e.key === "ArrowRight") seek(now() + 10);
-      else if (e.key === "ArrowLeft") seek(now() - 10);
+      else if (e.key === "ArrowLeft" && !e.altKey) seek(now() - 10);
       else if (e.key === "m") vid.muted = !vid.muted;
     };
     document.addEventListener("keydown", keys);
     watchCleanup = () => {
+      flushStats();
+      if (upTimer) { clearInterval(upTimer); upTimer = null; }
       alive = false;
       document.removeEventListener("keydown", keys);
       if (full) setFull(false);
       vid.pause(); vid.removeAttribute("src"); vid.load();
       call("stop_watch");
     };
-    open(qSel.value);
+    open(qSel.value, true);
     call("related", item).then((r) => { if (my === seq && alive) related.replaceChildren(r.ok ? grid(r.items, { empty: "Похожих не нашлось." }) : h("p", { class: "note" }, r.error)); });
   }
   /* ---------- Shorts: вертикальный плеер с листанием ---------- */
@@ -583,7 +677,8 @@
     const muteB = mk("Звук (M)", "🔊", () => toggleMute());
     const pauseB = mk("Пауза (пробел)", "❚❚", () => togglePause());
     const extB = mk("Открыть в отдельном окне (mpv)", "mpv", () => { const s0 = items[idx]; if (s0) playExternal(s0); });
-    const side = h("div", { class: "sh-side" }, prevB, nextB, pauseB, muteB, extB, countEl);
+    const backS = mk("Назад к списку (Alt+←)", "←", () => goBack());
+    const side = h("div", { class: "sh-side" }, backS, prevB, nextB, pauseB, muteB, extB, countEl);
     const frame = h("div", { class: "sh-frame" }, stage, h("div", { class: "sh-info" }, chEl, ttEl), msgEl);
     const hint = h("p", { class: "note sh-hint" }, "Колесо мыши, ↑ ↓, свайп — следующий и предыдущий; пробел — пауза; M — звук.");
     view(h("div", { class: "shorts-view" }, h("div", { class: "sh-row" }, frame, side), hint));
@@ -739,6 +834,13 @@
 
   /* ---------- экраны ---------- */
   function view(...kids) { $("view").replaceChildren(...kids); }
+  const useAcct = () => !!(acct.google && acct.google.signed_in) && S.account_feeds !== false;
+  const useVkAcct = () => !!(acct.vk && acct.vk.signed_in) && S.account_feeds !== false;
+  const acctPref = {};   // на время сеанса: «из аккаунта» или «на этом компьютере» для истории и т. п.
+  function reloginHint(text) {
+    return h("div", { class: "acct-hint", role: "status" }, h("span", {}, text + " "),
+      h("button", { class: "ghost", type: "button", onclick: () => go("settings", "accounts") }, "Войти заново"));
+  }
   function title(text, ...extra) { return h("h1", { class: "h1" }, text, ...extra); }
   function grid(items, opts) {
     lastItems = items;
@@ -759,7 +861,9 @@
     const note = h("p", { class: "note pg-note", hidden: true });
     const sentinel = h("div", { class: "sentinel", "aria-hidden": "true" });
     const wrap = h("div", { class: "paged" }, gridEl, h("div", { class: "pager" }, moreBtn, note), sentinel);
-    let seen = new Set(), total = [], cursor = null, busy = false, io = null;
+    let seen = new Set(), total = [], cursor = null, busy = false, io = null, lastMeta = null;
+    const restore = pendingRestore && pendingRestore.items ? pendingRestore : null;
+    pendingRestore = null;
     const alive = () => my === seq;
     const setNote = (t, err) => { note.hidden = !t; note.textContent = t || ""; note.classList.toggle("err", !!err); };
     const add = (items) => {
@@ -788,13 +892,25 @@
       if (got && nearEnd()) setTimeout(loadMore, 60);
     }
     moreBtn.addEventListener("click", loadMore);
+    function observe() {
+      if ("IntersectionObserver" in window) {
+        io = new IntersectionObserver((es) => { if (!alive()) { io.disconnect(); return; } if (es.some((e) => e.isIntersecting)) loadMore(); }, { rootMargin: "900px 0px" });
+        io.observe(sentinel);
+      }
+    }
     async function begin() {
+      if (restore) {   // вернулись «Назад»: тот же список, те же догруженные страницы, без запросов
+        gridEl.replaceChildren(); add(restore.items); cursor = restore.cursor || null; lastMeta = restore.meta || null;
+        if (opts.onMeta && lastMeta) opts.onMeta(lastMeta);
+        setNote(""); status(""); sync(); observe();
+        return;
+      }
       let shown = false;
       if (opts.cache !== false) {
         const c = await fetchPage(null, "cache");
         if (!alive()) return;
         if (c.ok && c.items && c.items.length) {
-          gridEl.replaceChildren(); add(c.items); cursor = null; shown = true;
+          gridEl.replaceChildren(); add(c.items); cursor = null; shown = true; lastMeta = c;
           if (opts.onMeta) opts.onMeta(c);
           setNote("Показано сохранённое, обновляю…");
         }
@@ -802,25 +918,22 @@
       const r = await fetchPage(null, "fresh");
       if (!alive()) return;
       if (!r.ok) {
-        if (!shown) gridEl.replaceChildren(h("p", { class: "empty" }, r.error));
+        if (!shown) gridEl.replaceChildren(/Войдите заново|Сначала войдите/.test(r.error || "") ? reloginHint(r.error) : h("p", { class: "empty" }, r.error));
         setNote(shown ? "Не удалось обновить: " + r.error : "", shown);
         status(shown ? "" : r.error, shown ? "" : "err");
         return;
       }
       const same = shown && r.items.length && r.items.slice(0, 6).every((x, i) => total[i] && total[i].id === x.id);
       if (!same) { gridEl.replaceChildren(); seen = new Set(); total = []; }
-      add(r.items); cursor = r.more || null; setNote(""); status("");
+      add(r.items); cursor = r.more || null; setNote(""); status(""); lastMeta = r;
       if (opts.onMeta) opts.onMeta(r);
       if (!total.length) gridEl.replaceChildren(h("p", { class: "empty" }, opts.empty || "Ничего не найдено."));
-      sync();
-      if ("IntersectionObserver" in window) {
-        io = new IntersectionObserver((es) => { if (!alive()) { io.disconnect(); return; } if (es.some((e) => e.isIntersecting)) loadMore(); }, { rootMargin: "900px 0px" });
-        io.observe(sentinel);
-      }
+      sync(); observe();
       if (nearEnd()) setTimeout(loadMore, 60);
     }
-    activePager = { loadMore: () => loadMore(), alive };
-    status("Загружаю…", "busy");
+    activePager = { loadMore: () => loadMore(), alive,
+      snapshot: () => (total.length ? { items: total.slice(), cursor, meta: lastMeta } : null) };
+    if (!restore) status("Загружаю…", "busy");
     begin();
     return wrap;
   }
@@ -836,22 +949,64 @@
   }
   const CAT = { music: "Музыка", games: "Игры", news: "Новости", sport: "Спорт", live: "Трансляции", fashion: "Мода и красота", learn: "Обучение" };
 
-  function go(viewName, arg, label) {
+  function snapshotCurrent() {
+    return { view: current.view, arg: current.arg, title: current.title, source,
+             scroll: window.scrollY || 0, snap: activePager && activePager.snapshot ? activePager.snapshot() : null };
+  }
+  function syncBackButtons() {
+    document.querySelectorAll(".back-btn").forEach((b) => { b.disabled = !navStack.length && current.view === "home"; });
+  }
+  function go(viewName, arg, label, opts) {
+    if (!(opts && opts.noPush) && current && current.view && !(current.view === viewName && (current.arg || null) === (arg || null))) {
+      navStack.push(snapshotCurrent());
+      if (navStack.length > 40) navStack.shift();
+    }
     if (watchCleanup) { watchCleanup(); watchCleanup = null; }
     current = { view: viewName, arg: arg || null, title: label || "" };
     if (dlTimer) { clearInterval(dlTimer); dlTimer = null; }
     closeMenu(); markNav();
     setSource(viewName === "vk" ? "vk" : (viewName === "search" ? source : "yt"), true);
+    pendingRestore = null;
     window.scrollTo(0, 0);
+    syncBackButtons();
     reload();
+  }
+  function restoreScroll(y) {
+    let n = 0;
+    const step = () => {
+      window.scrollTo(0, y);
+      if (++n < 45 && Math.abs((window.scrollY || 0) - y) > 2) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+  /* «Назад»: возвращает предыдущий экран. Списки (поиск, главная, канал, подписки…) приходят из снимка: те же видео,
+     те же догруженные страницы и то же место прокрутки, без новых запросов. */
+  function goBack() {
+    const e = navStack.pop();
+    if (!e) { if (current.view !== "home") go("home", null, "Главная", { noPush: true }); return false; }
+    if (watchCleanup) { watchCleanup(); watchCleanup = null; }
+    if (dlTimer) { clearInterval(dlTimer); dlTimer = null; }
+    current = { view: e.view, arg: e.arg, title: e.title };
+    closeMenu(); markNav();
+    setSource(e.source, true);
+    if (e.view === "search" && typeof e.arg === "string") $("q").value = e.arg;
+    pendingRestore = e.snap;
+    syncBackButtons();
+    reload();
+    restoreScroll(e.scroll || 0);
+    return true;
   }
   function reload() {
     const v = current.view;
     ++seq; activePager = null;
     if (v === "home") {
       const sub = h("small", {});
-      return view(title("Главная", sub), pagedGrid((c, m) => call("feed", "home", null, c, m), {
-        onMeta: (r) => { sub.textContent = r.from === "subs" ? "новое с ваших подписок" : "популярное за неделю — подпишитесь на каналы, и здесь будут они"; } }));
+      const hint = h("div", { class: "acct-wrap" });
+      return view(title("Главная", sub), hint, pagedGrid((c, m) => call("feed", "home", null, c, m), {
+        onMeta: (r) => {
+          sub.textContent = r.from === "account" ? "рекомендации вашего аккаунта YouTube" : r.from === "subs" ? "новое с ваших подписок" : "популярное за неделю — подпишитесь на каналы, и здесь будут они";
+          hint.replaceChildren(...(r.account_error ? [reloginHint(r.account_error)] : []));
+        } }));
     }
     if (v === "shorts") return showShorts(current.arg);
     if (v === "subs") return showSubs();
@@ -859,11 +1014,7 @@
     if (v === "channel") { const cid = current.arg; return view(title(current.title || "Канал",
       h("span", { class: "sp" }), h("button", { class: "ghost", type: "button", onclick: () => subscribe(cid, current.title, true) }, "Подписаться")),
       pagedGrid((c, m) => call("feed", "channel", cid, c, m))); }
-    if (v === "history") return load(() => call("library", "history"), (r) => view(title("История", h("span", { class: "sp" }), acctBtn("history", "История"),
-      h("button", { class: "ghost", type: "button", onclick: async () => { if (confirm("Очистить всю историю просмотра?")) { await call("clear_history"); reload(); refreshCounts(); } } }, "Очистить")),
-      grid(r.items, { empty: "Вы ещё ничего не смотрели. Историю из YouTube можно перенести через Google Takeout в настройках." })));
-    if (v === "later" || v === "favorite") return load(() => call("library", v), (r) => view(title(v === "later" ? "Смотреть позже" : "Избранное", h("span", { class: "sp" }), v === "later" ? acctBtn("later", "Смотреть позже") : acctBtn("liked", "Понравившиеся")),
-      grid(r.items, { mark: v, empty: "Добавляйте видео через меню «⋯» на карточке." })));
+    if (v === "history" || v === "later" || v === "favorite") return showLibrary(v);
     if (v === "playlists") return showPlaylists();
     if (v === "playlist") return load(() => call("library", "playlist", current.arg), (r) => view(title(current.title,
       h("span", { class: "sp" }), h("button", { class: "ghost", type: "button", onclick: async () => { if (confirm("Удалить плейлист «" + current.title + "»?")) { await call("delete_playlist", current.arg); go("playlists"); refreshCounts(); } } }, "Удалить плейлист")),
@@ -874,11 +1025,26 @@
     if (v === "settings") return showSettings(current.arg);
     if (v === "watch") return showWatch(current.arg);
     if (v === "acct") return showAccountFeed(current.arg, current.title);
-    if (v === "acctpl") return load(() => call("account_feed", "playlist", current.arg), (r) => view(title(current.title || "Плейлист", h("small", {}, "из аккаунта YouTube")), grid(r.items)));
+    if (v === "acctpl") return view(title(current.title || "Плейлист", h("small", {}, "из аккаунта YouTube")),
+      pagedGrid((c, m) => call("feed", "acct", "playlist:" + current.arg, c, m), { empty: "Плейлист пуст." }));
   }
-  function acctBtn(kind, label) {
-    if (!acct.google || !acct.google.signed_in) return null;
-    return h("button", { class: "ghost", type: "button", onclick: () => go("acct", kind, label) }, ic("user"), " " + label + " из аккаунта");
+  function acctBtn() { return null; }   // раньше отдельная кнопка «из аккаунта»; теперь списки из аккаунта открываются сами
+  const LIB = { history: ["История", "history", "Вы ещё ничего не смотрели. Историю из YouTube можно перенести через Google Takeout в настройках."],
+    later: ["Смотреть позже", "later", "Добавляйте видео через меню «⋯» на карточке."],
+    favorite: ["Избранное", "liked", "Добавляйте видео через меню «⋯» на карточке."] };
+  /* История, «Смотреть позже», «Избранное»: после входа в Google — из аккаунта (с подгрузкой), иначе (или по кнопке) — локальные. */
+  function showLibrary(v) {
+    const [name, acctKind, empty] = LIB[v];
+    const local = !useAcct() || acctPref[v] === "local";
+    const swBtn = useAcct() ? h("button", { class: "ghost", type: "button", onclick: () => { acctPref[v] = local ? "acct" : "local"; reload(); } },
+      ic("user"), local ? " Из аккаунта YouTube" : " На этом компьютере") : null;
+    if (!local) {
+      return view(title(name, h("small", {}, "из аккаунта YouTube"), h("span", { class: "sp" }), swBtn),
+        pagedGrid((c, m) => call("feed", "acct", acctKind, c, m), { empty: "В аккаунте здесь пусто." }));
+    }
+    return load(() => call("library", v), (r) => view(title(name, h("span", { class: "sp" }), swBtn,
+      v === "history" ? h("button", { class: "ghost", type: "button", onclick: async () => { if (confirm("Очистить всю историю просмотра?")) { await call("clear_history"); reload(); refreshCounts(); } } }, "Очистить") : null),
+      grid(r.items, v === "history" ? { empty } : { mark: v, empty })));
   }
   async function showAccountFeed(kind, label) {
     if (kind === "playlists") {
@@ -895,6 +1061,12 @@
   }
 
   async function showSubs() {
+    if (useAcct()) {
+      const hint = h("div", { class: "acct-wrap" });
+      return view(title("Подписки", h("small", {}, "лента вашего аккаунта YouTube")), hint,
+        pagedGrid((c, m) => call("feed", "subs", null, c, m), { empty: "Новых видео от подписок пока нет.",
+          onMeta: (r) => hint.replaceChildren(...(r.account_error ? [reloginHint(r.account_error)] : [])) }));
+    }
     const my0 = seq;
     const r = await call("library", "subscriptions");
     if (my0 !== seq) return;
@@ -913,6 +1085,19 @@
     if (f) f.replaceChildren(pagedGrid((c, m) => call("feed", "subs", null, c, m), { empty: "Новых видео от подписок пока нет." }));
   }
 
+  async function acctPlaylists(host) {
+    const r = await call("account_feed", "playlists");
+    if (current.view !== "playlists") return;
+    if (!r.ok) { host.replaceChildren(/Войдите заново/.test(r.error) ? reloginHint(r.error) : h("p", { class: "note err" }, r.error)); return; }
+    host.replaceChildren(h("h2", { class: "h1" }, h("small", {}, "Плейлисты из аккаунта YouTube")),
+      r.playlists.length ? h("div", { class: "grid" }, ...r.playlists.map((p) => {
+        const c = h("div", { class: "card pl-card", role: "button", tabindex: "0" },
+          h("div", { class: "thumb" }, p.thumb && MEDIA ? h("img", { src: img(p.thumb), alt: "" }) : ic("list"), p.count ? h("span", { class: "count" }, String(p.count)) : null),
+          h("div", { class: "meta" }, h("div", { class: "title" }, p.title)));
+        c.addEventListener("click", () => go("acctpl", p.id, p.title));
+        return c;
+      })) : h("p", { class: "empty" }, "В аккаунте нет плейлистов."));
+  }
   async function showPlaylists() {
     const r = await call("library", "playlists");
     const pls = r.ok ? r.playlists : [];
@@ -920,12 +1105,14 @@
       const name = prompt("Название нового плейлиста"); if (!name) return;
       const x = await call("create_playlist", name); if (!x.ok) status(x.error, "err"); reload(); refreshCounts();
     } }, "Новый плейлист");
-    view(title("Плейлисты", h("span", { class: "sp" }), acctBtn("playlists", "Плейлисты"), add), pls.length ? h("div", { class: "grid" }, ...pls.map((p) => {
+    const acctHost = h("div", { class: "acct-wrap" });
+    view(title("Плейлисты", h("span", { class: "sp" }), add), acctHost, pls.length ? h("h2", { class: "h1" }, h("small", {}, "На этом компьютере")) : null, pls.length ? h("div", { class: "grid" }, ...pls.map((p) => {
       const thumb = h("div", { class: "thumb" }, p.thumb && MEDIA ? h("img", { src: img(p.thumb), alt: "" }) : ic("list"), h("span", { class: "count" }, String(p.count)));
       const c = h("div", { class: "card pl-card", role: "button", tabindex: "0" }, thumb, h("div", { class: "meta" }, h("div", { class: "title" }, p.name), h("div", { class: "sub" }, "видео: " + p.count)));
       c.addEventListener("click", () => go("playlist", p.id, p.name));
       return c;
-    })) : h("p", { class: "empty" }, "Плейлистов пока нет. Создайте свой или перенесите из YouTube через Google Takeout."));
+    })) : (useAcct() ? null : h("p", { class: "empty" }, "Плейлистов пока нет. Создайте свой или перенесите из YouTube через Google Takeout.")));
+    if (useAcct()) acctPlaylists(acctHost);
   }
 
   const DL_STATUS = { queued: "в очереди", running: "скачивается", done: "готово", error: "ошибка", cancelled: "отменено" };
@@ -950,20 +1137,39 @@
     dlTimer = setInterval(render, 1500);
   }
 
+  const VKTABS = [["recommended", "Рекомендации"], ["subs", "Подписки"], ["my", "Мои видео"], ["recent", "Недавно смотрели"]];
+  let vkTab = "recommended";
   async function showVk() {
-    const r = await call("library", "history");
-    const vkItems = r.ok ? r.items.filter((i) => i.source === "vk") : [];
-    view(title("VK Видео"),
-      h("div", { class: "vk-hero" }, h("div", { class: "logo" }, ic("vk")), h("div", {},
-        h("b", {}, "VK Видео"),
-        h("p", {}, (acct.vk && acct.vk.signed_in ? "Вход в VK выполнен. " : "Без входа поиск работает как у гостя. ") +
-          "Ищите сверху или вставьте ссылку vkvideo.ru / vk.com. Ролики 18+ — только после входа в VK и с включённым переключателем."),
-        h("div", { class: "row2" },
-          acct.vk && acct.vk.signed_in ? h("label", { class: "check" }, (() => { const cb = h("input", { type: "checkbox" }); cb.checked = !!S.vk_adult; cb.addEventListener("change", () => saveSettings({ vk_adult: cb.checked })); return cb; })(), "Показывать 18+ в поиске")
-            : h("button", { class: "ghost", type: "button", onclick: () => go("settings", "accounts") }, "Войти в VK")))),
-      h("h2", { class: "h1" }, h("small", {}, "Недавно смотрели в VK")),
-      grid(vkItems, { empty: "Здесь появятся ролики VK, которые вы открывали." }));
-    status("");
+    const signed = useVkAcct();
+    const hero = h("div", { class: "vk-hero" }, h("div", { class: "logo" }, ic("vk")), h("div", {},
+      h("b", {}, "VK Видео"),
+      h("p", {}, (acct.vk && acct.vk.signed_in ? "Вход в VK выполнен. " : "Без входа поиск работает как у гостя. ") +
+        "Ищите сверху или вставьте ссылку vkvideo.ru / vk.com. Ролики 18+ — только после входа в VK и с включённым переключателем."),
+      h("div", { class: "row2" },
+        acct.vk && acct.vk.signed_in ? h("label", { class: "check" }, (() => { const cb = h("input", { type: "checkbox" }); cb.checked = !!S.vk_adult; cb.addEventListener("change", () => saveSettings({ vk_adult: cb.checked })); return cb; })(), "Показывать 18+ в поиске")
+          : h("button", { class: "ghost", type: "button", onclick: () => go("settings", "accounts") }, "Войти в VK"))));
+    const body = h("div", { class: "vk-body" });
+    const tabs = h("div", { class: "seg vk-tabs", role: "tablist", "aria-label": "Раздел VK" });
+    const show = async (k) => {
+      vkTab = k; ++seq; activePager = null;
+      tabs.querySelectorAll("button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.k === k)));
+      if (k === "recent") {
+        const r = await call("library", "history");
+        const vkItems = r.ok ? r.items.filter((i) => i.source === "vk") : [];
+        body.replaceChildren(grid(vkItems, { empty: "Здесь появятся ролики VK, которые вы открывали." }));
+        status("");
+        return;
+      }
+      body.replaceChildren(pagedGrid((c, m) => call("vk_feed", k, c, m), { empty: "VK ничего не показал в этом разделе.", cache: true }));
+    };
+    for (const [k, t] of VKTABS) {
+      if (!signed && k !== "recent") continue;
+      const b = h("button", { type: "button", role: "tab", "data-k": k, "aria-selected": "false" }, t);
+      b.addEventListener("click", () => show(k));
+      tabs.append(b);
+    }
+    view(title("VK Видео"), hero, signed ? tabs : h("h2", { class: "h1" }, h("small", {}, "Недавно смотрели в VK")), body);
+    await show(signed ? (VKTABS.some(([k]) => k === vkTab) ? vkTab : "recommended") : "recent");
   }
 
   function doSearch(q) {
@@ -1424,6 +1630,12 @@
     const codec = h("select", { "aria-label": "Кодек" }, h("option", { value: "auto" }, "Авто (лучшее качество, может быть AV1/VP9)"), h("option", { value: "h264" }, "H.264 — легче для видеокарты"));
     codec.value = S.codec;
     codec.addEventListener("change", () => saveSettings({ codec: codec.value }));
+    const startQ = h("select", { "aria-label": "Качество старта" }, ...[["360", "360p"], ["480", "480p"], ["720", "720p"]].map(([v, t]) => h("option", { value: v }, t)));
+    startQ.value = S.start_quality || "480";
+    startQ.addEventListener("change", () => saveSettings({ start_quality: startQ.value }));
+    const pre = h("select", { "aria-label": "Предзагрузка" }, ...[8, 16, 32, 64, 128].map((n) => h("option", { value: String(n) }, n + " МБ")));
+    pre.value = String(S.prefetch_mb || 32);
+    pre.addEventListener("change", () => saveSettings({ prefetch_mb: Number(pre.value) }));
     const sbChecks = h("div", { class: "checks" }, ...Object.entries(SB_NAMES).map(([k, n]) => {
       const cb = h("input", { type: "checkbox", value: k }); cb.checked = S.sb_categories.includes(k);
       cb.addEventListener("change", () => saveSettings({ sb_categories: [...sbChecks.querySelectorAll("input:checked")].map((x) => x.value) }));
@@ -1450,6 +1662,11 @@
           return seg;
         })()),
         field("Кодек видео", codec),
+        field("Быстрый старт", sw(S.fast_start !== false, (v) => saveSettings({ fast_start: v }), "Быстрый старт"), startQ,
+          h("span", { class: "note" }, "видео начинается с этого качества, а когда набран запас, само поднимается до выбранного")),
+        field("Предзагрузка", pre, h("span", { class: "note" }, "сколько видео держать загруженным заранее: больше — реже буферизация, но больше трафика, если вы закрыли ролик")),
+        field("Аккаунты", sw(S.account_feeds !== false, (v) => saveSettings({ account_feeds: v }), "Ленты из аккаунта"),
+          h("span", { class: "note" }, "после входа брать Главную, Подписки, Историю и плейлисты из аккаунта Google и VK")),
         field("SponsorBlock", sw(S.sponsorblock, (v) => saveSettings({ sponsorblock: v }), "SponsorBlock"), h("span", { class: "note" }, "пропускать рекламу внутри роликов YouTube")),
         sbChecks,
         h("p", { class: "note" }, "SponsorBlock получает только 4 символа хеша от ID видео — какой ролик вы смотрите, сервер не знает."),
@@ -1632,12 +1849,26 @@
     const st = await call("get_state");
     if (!st.ok) { status(st.error, "err"); return; }
     S = st.settings; counts = st.counts; MEDIA = st.media || "";
-    buildSide(); refreshAccounts(); buildStage(); wireChat(); applyAssistant(false); setQuality(S.quality); updateRouteChip();
+    buildSide(); await refreshAccounts(); buildStage(); wireChat(); applyAssistant(false); setQuality(S.quality); updateRouteChip();
     $("searchForm").addEventListener("submit", (e) => {
       e.preventDefault();
       const q = $("q").value.trim();
-      if (q) { current = { view: "search", arg: q, title: "" }; markNav(); reload(); }
+      if (q) go("search", q, "");
     });
+    $("backBtn").addEventListener("click", () => goBack());
+    syncBackButtons();
+    // Alt+←, Backspace (вне полей ввода) и боковая кнопка мыши «Назад» — как в браузере
+    document.addEventListener("keydown", (e) => {
+      const t = e.target, tag = (t && t.tagName || "");
+      const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(tag) || (t && t.isContentEditable);
+      if ((e.key === "ArrowLeft" && e.altKey && !e.ctrlKey && !e.metaKey) || (e.key === "Backspace" && !typing && !e.altKey && !e.ctrlKey)) {
+        if (document.querySelector("dialog[open]")) return;
+        e.preventDefault(); goBack();
+      }
+    });
+    const mouseBack = (e) => { if (e.button === 3) { e.preventDefault(); goBack(); } };
+    window.addEventListener("mouseup", mouseBack);
+    window.addEventListener("auxclick", (e) => { if (e.button === 3) e.preventDefault(); });
     document.querySelectorAll("#qualitySeg button").forEach((b) => b.addEventListener("click", async () => {
       if (await saveSettings({ quality: b.dataset.q })) setQuality(b.dataset.q);
     }));

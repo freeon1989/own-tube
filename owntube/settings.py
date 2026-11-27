@@ -41,6 +41,9 @@ def default_download_dir() -> str:
     return str(Path.home() / "Videos" / "own-tube")
 
 
+PREFETCH_MB = (8, 16, 32, 64, 128)
+
+
 @dataclass
 class Settings:
     proxy: str = ""          # scheme://host:port, без логина и пароля
@@ -68,6 +71,10 @@ class Settings:
     whisper_dir: str = ""     # где лежит/куда ставить whisper.cpp; пусто — папка данных программы
     update_check: bool = True  # при запуске один запрос к api.github.com: есть ли новая версия (ставится только по кнопке)
     update_skip: str = ""     # версия, о которой не напоминать
+    fast_start: bool = True   # начинать видео с качества пониже (start_quality) и поднимать до выбранного, когда набран запас
+    start_quality: str = "480"  # 360 | 480 | 720
+    prefetch_mb: int = 32     # «предзагрузка»: сколько мегабайт потока держать заранее впереди воспроизведения
+    account_feeds: bool = True  # после входа в Google/VK главная, подписки, история и т. д. берутся из аккаунта
 
     def public(self) -> dict:
         return asdict(self)
@@ -131,6 +138,16 @@ def _validated(raw: dict, strict: bool = False) -> Settings:
     take("voice_tts", boolean)
     take("stt_autosend", boolean)
     take("update_check", boolean)
+    take("fast_start", boolean)
+    take("account_feeds", boolean)
+    take("start_quality", lambda v: validate.clean_choice(v, ("360", "480", "720"), "качество старта"))
+
+    def prefetch(v):
+        if isinstance(v, bool) or not isinstance(v, int) or v not in PREFETCH_MB:
+            raise ValueError("Предзагрузка: " + ", ".join(map(str, PREFETCH_MB)) + " МБ")
+        return v
+
+    take("prefetch_mb", prefetch)
 
     def version(v):
         if not isinstance(v, str) or (v and not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}", v)):

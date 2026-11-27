@@ -123,7 +123,7 @@ def parse_search(resp: dict) -> list[dict]:
         if isinstance(p, dict) and isinstance(p.get("id"), int):
             names[p["id"]] = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
     out, seen = [], set()
-    pool = list(resp.get("videos") or [])
+    pool = list(resp.get("videos") or []) + [v for v in (resp.get("items") or []) if isinstance(v, dict) and "owner_id" in v]
     for c in resp.get("catalog_videos") or []:
         if isinstance(c, dict) and isinstance(c.get("video"), dict):
             pool.append(c["video"])
@@ -154,10 +154,15 @@ def _token(route: Route, cookie: str) -> tuple[str, bool]:
     return anonymous_token(route), False
 
 
+RELOGIN = "Войдите заново в VK (Настройки → Аккаунты → VK → «Войти»): сессия истекла или VK её не принял."
+
+
 def _check(data: dict) -> dict:
     if "error" in data:
-        msg = (data.get("error") or {}).get("error_msg") if isinstance(data.get("error"), dict) else ""
-        raise ValueError("VK: " + validate.clean_text(msg or "ошибка поиска", 200))
+        err = data.get("error") if isinstance(data.get("error"), dict) else {}
+        if err.get("error_code") in (5, 7, 15, 17, 27, 28):  # авторизация / нет доступа / токен
+            raise ValueError(RELOGIN)
+        raise ValueError("VK: " + validate.clean_text(err.get("error_msg") or "ошибка запроса", 200))
     return data.get("response") or {}
 
 
@@ -175,6 +180,8 @@ def search(query: str, route: Route, cookie: str = "", adult: bool = False, coun
     """Поиск роликов VK. Без входа — гостевой доступ; 18+ — только после входа в VK.
     cursor — «ещё»: следующая страница раздела (catalog.getSection)."""
     token, signed = _token(route, cookie)
+    if cursor and cursor["sec"] == MY_SECTION:
+        return _my_videos(token, route, int(cursor["t"]) if str(cursor["t"]).isdigit() else 0, signed)
     if cursor:
         form = {"access_token": token, "section_id": cursor["sec"], "start_from": cursor["t"]}
         resp = _check(_post(VK_API + f"catalog.getSection?v={VK_V}&client_id={VK_CLIENT_ID}", form, route))
@@ -185,3 +192,63 @@ def search(query: str, route: Route, cookie: str = "", adult: bool = False, coun
             form["adult"] = "1"
         resp = _check(_post(VK_API + f"catalog.getVideoSearchWeb2?v={VK_V}&client_id={VK_CLIENT_ID}", form, route))
     return {"items": parse_search(resp), "signed_in": signed, "adult": bool(adult and signed), "more": _cursor(resp)}
+
+
+# ---------- ленты вошедшего пользователя: рекомендации, подписки, «Мои видео» ----------
+MY_SECTION = "@my"
+FEED_TITLES = {"recommended": ("рекомен", "для вас", "главн", "популяр"), "subs": ("подпис",)}
+
+
+def _sections(resp: dict) -> list[dict]:
+    cat = resp.get("catalog") if isinstance(resp.get("catalog"), dict) else {}
+    return [x for x in (cat.get("sections") or []) if isinstance(x, dict) and isinstance(x.get("id"), str)]
+
+
+def pick_section(sections: list[dict], kind: str) -> dict | None:
+    """Раздел каталога vkvideo.ru по названию: «Рекомендации» / «Подписки». Нет подходящего — None
+    (для рекомендаций берём первый раздел, для подписок честно говорим, что раздела нет)."""
+    words = FEED_TITLES.get(kind, ())
+    for sec in sections:
+        title = str(sec.get("title") or "").lower()
+        sid = str(sec.get("id") or "").lower()
+        if any(w in title or w in sid for w in words):
+            return sec
+    return sections[0] if kind == "recommended" and sections else None
+
+
+def _my_videos(token: str, route: Route, offset: int, signed: bool) -> dict:
+    """«Мои видео»: video.get владельца-пользователя (users.get без id отдаёт текущего)."""
+    me = _check(_post(VK_API + f"users.get?v={VK_V}&client_id={VK_CLIENT_ID}", {"access_token": token}, route))
+    row = me[0] if isinstance(me, list) and me and isinstance(me[0], dict) else {}
+    uid = row.get("id")
+    if not isinstance(uid, int):
+        raise ValueError(RELOGIN)
+    count = 40
+    resp = _check(_post(VK_API + f"video.get?v={VK_V}&client_id={VK_CLIENT_ID}",
+                        {"access_token": token, "owner_id": str(uid), "count": str(count), "offset": str(offset),
+                         "extended": "1"}, route))
+    items = parse_search(resp)
+    total = resp.get("count") if isinstance(resp.get("count"), int) else 0
+    nxt = {"k": "vk", "sec": MY_SECTION, "t": str(offset + count)} if offset + count < total else None
+    return {"items": items, "signed_in": signed, "adult": False, "more": nxt}
+
+
+def feed(kind: str, route: Route, cookie: str, adult: bool = False) -> dict:
+    """Первая страница ленты вошедшего пользователя. Без входа — ошибка с подсказкой, а не пустой список."""
+    if kind not in ("recommended", "subs", "my"):
+        raise ValueError("Неизвестная лента VK")
+    token, signed = _token(route, cookie)
+    if not signed:
+        raise ValueError(RELOGIN if cookie else "Сначала войдите в VK (Настройки → Аккаунты)")
+    if kind == "my":
+        return _my_videos(token, route, 0, True)
+    top = _check(_post(VK_API + f"catalog.getVideo?v={VK_V}&client_id={VK_CLIENT_ID}", {"access_token": token}, route))
+    sec = pick_section(_sections(top), kind)
+    if sec is None:
+        raise ValueError("VK не показывает раздел «Подписки» для этого аккаунта")
+    resp = _check(_post(VK_API + f"catalog.getSection?v={VK_V}&client_id={VK_CLIENT_ID}",
+                        {"access_token": token, "section_id": sec["id"]}, route))
+    items = parse_search(resp)
+    if not items:
+        items = parse_search(top) if kind == "recommended" else []
+    return {"items": items, "signed_in": True, "adult": False, "more": _cursor(resp), "title": validate.clean_text(sec.get("title"), 80)}
