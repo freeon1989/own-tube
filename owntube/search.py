@@ -90,7 +90,7 @@ def _flat(url: str, route: Route, limit: int) -> list[dict]:
 
 def search(query: str, route: Route = Route(), limit: int = DEFAULT_LIMIT, sp: str = "") -> list[dict]:
     text = validate.clean_query(query)
-    limit = max(1, min(int(limit), 60))
+    limit = max(1, min(int(limit), 120))
     if sp:
         return _flat(f"https://www.youtube.com/results?search_query={quote(text)}&sp={sp}", route, limit)
     return _flat(f"ytsearch{limit}:{text}", route, limit)

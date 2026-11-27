@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import collections
 import re
+import socket
 import logging
 import secrets
 import subprocess
@@ -31,6 +32,8 @@ IMG_CACHE = 400
 IMG_LIMIT = 3 * 1024 * 1024
 CHUNK = 64 * 1024
 RETRIES_403 = 6
+MAX_SESSIONS = 4
+NET_HINTS = ("502", "timed out", "refused", "Connection reset", "Network is unreachable", "Server returned 5", "I/O error", "End of file")
 _URL = re.compile(r"https?://\S+")
 
 
@@ -41,7 +44,8 @@ class MediaServer:
         self.token = secrets.token_urlsafe(18)
         self._img: collections.OrderedDict[str, tuple[str, bytes]] = collections.OrderedDict()
         self._img_lock = threading.Lock()
-        self._sessions: dict[str, dict] = {}
+        self._sessions: collections.OrderedDict[str, dict] = collections.OrderedDict()
+        self._refresh: dict[str, Callable[[], dict]] = {}
         self._procs: dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
         self.last_error = ""  # последняя ошибка ffmpeg (без секретов) — для самопроверки и журнала
@@ -69,12 +73,34 @@ class MediaServer:
         self._httpd.server_close()
 
     # --- видео ---
-    def add_session(self, streams: dict) -> str:
+    def add_session(self, streams: dict, refresh: Callable[[], dict] | None = None, exclusive: bool = True) -> str:
+        """Новый сеанс просмотра. exclusive=True — обычное видео: всё остальное останавливается.
+        Для Shorts (exclusive=False) живут до MAX_SESSIONS сеансов: следующий ролик подготовлен заранее.
+        refresh — как получить свежие потоки (другой формат), если прежние не открылись."""
         sid = secrets.token_urlsafe(9)
         with self._lock:
-            self.stop_all_locked()
-            self._sessions = {sid: dict(streams)}
+            if exclusive:
+                self.stop_all_locked()
+                self._sessions.clear()
+                self._refresh.clear()
+            self._sessions[sid] = dict(streams)
+            if refresh:
+                self._refresh[sid] = refresh
+            while len(self._sessions) > MAX_SESSIONS:
+                old, _ = self._sessions.popitem(last=False)
+                self._refresh.pop(old, None)
+                proc = self._procs.pop(old, None)
+                if proc:
+                    _kill(proc)
         return sid
+
+    def drop_session(self, sid: str) -> None:
+        with self._lock:
+            self._sessions.pop(sid, None)
+            self._refresh.pop(sid, None)
+            proc = self._procs.pop(sid, None)
+        if proc:
+            _kill(proc)
 
     def stop_all(self) -> None:
         with self._lock:
@@ -105,7 +131,7 @@ class MediaServer:
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
-            log.warning("Медиасервер: %s", validate.redact(str(exc))[:200])
+            log.warning("Медиасервер (%s): %s", "картинка" if rest == "img" else "видео", validate.redact(str(exc))[:200])
             try:
                 _send(req, 502)
             except OSError:
@@ -121,9 +147,15 @@ class MediaServer:
             if hit:
                 self._img.move_to_end(url)
         if not hit:
-            status, headers, data = httpc.get(url, self._route_fn(), {"Accept": "image/*"}, limit=IMG_LIMIT, timeout=15)
+            try:
+                status, headers, data = httpc.get(url, self._route_fn(), {"Accept": "image/*"}, limit=IMG_LIMIT, timeout=15)
+            except OSError as exc:
+                host = urlsplit(url).hostname
+                log.warning("Обложка (%s) не загрузилась: %s", host, validate.redact(str(exc))[:120])
+                return _send(req, 502)
             ctype = headers.get("content-type", "")
             if status != 200 or not ctype.startswith("image/"):
+                log.warning("Обложка (%s): HTTP %s", urlsplit(url).hostname, status)
                 return _send(req, 502)
             hit = (ctype.split(";")[0], data)
             with self._img_lock:
@@ -149,8 +181,11 @@ class MediaServer:
         proxy = route.mpv_proxy() if not route.direct else ""
         cmd = ffmpeg_command(ffmpeg, streams, start, proxy)
         flags = 0x08000000 if sys.platform.startswith("win") else 0
-        # googlevideo иногда отвечает 403 в первые секунды после выдачи адреса — пробуем ещё раз
-        for attempt in range(RETRIES_403 + 1):
+        host = urlsplit(streams.get("video") or "").hostname or "?"
+        refreshed = False
+        attempt = 0
+        t0 = time.monotonic()
+        while True:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     shell=False, creationflags=flags, bufsize=CHUNK)  # ждём полный кусок или конец
             errors: collections.deque[str] = collections.deque(maxlen=20)
@@ -163,6 +198,9 @@ class MediaServer:
                 self._procs[sid] = proc
             first = proc.stdout.read(CHUNK)
             if first:
+                if attempt or refreshed:
+                    log.info("Видео (%s) открылось с попытки %d%s за %.1f с", host, attempt + 1,
+                             ", после обновления адреса" if refreshed else "", time.monotonic() - t0)
                 break
             try:
                 proc.wait(timeout=5)
@@ -172,15 +210,42 @@ class MediaServer:
             msg = " ".join(errors) or f"код {proc.returncode}"
             with self._lock:
                 current = sid in self._sessions
+                refresh = self._refresh.get(sid)
                 if self._procs.get(sid) is proc:
                     self._procs.pop(sid, None)
-            if "403" in msg and attempt < RETRIES_403 and current:
-                log.info("ffmpeg: 403 от сервера видео, повтор %d", attempt + 1)
+            if not current:
+                return _send(req, 410)
+            v6_direct = (not proxy and refresh and not refreshed
+                         and httpc.family_of(streams.get("video") or "") == socket.AF_INET6)
+            if "403" in msg and attempt < RETRIES_403 and not v6_direct:
+                attempt += 1
+                log.info("ffmpeg: 403 от сервера видео (%s), повтор %d", host, attempt)
                 time.sleep(1.5)
+                continue
+            net = any(h in msg for h in NET_HINTS)
+            if (net or "403" in msg or "404" in msg or "410" in msg) and refresh and not refreshed:
+                # адрес мог устареть или прокси не дошёл до этого сервера: просим другой формат/адрес и пробуем ещё раз
+                refreshed = True
+                log.info("Видео (%s): %s — обновляю адрес потока", host, "сеть" if net else "HTTP 4xx")
+                try:
+                    streams = refresh() or streams
+                    with self._lock:
+                        if sid in self._sessions:
+                            self._sessions[sid] = dict(streams)
+                    cmd = ffmpeg_command(ffmpeg, streams, start, proxy)
+                    host = urlsplit(streams.get("video") or "").hostname or host
+                    continue
+                except Exception as exc:
+                    log.warning("Не удалось обновить адрес потока: %s", validate.redact(str(exc))[:160])
+            if net and attempt < 2:
+                attempt += 1
+                log.info("ffmpeg: сеть (%s), повтор %d", host, attempt)
+                time.sleep(1.0 * attempt)
                 continue
             msg = _URL.sub("<адрес потока>", validate.redact(msg))  # в адресе потока есть IP пользователя
             self.last_error = msg[-600:]
-            log.warning("ffmpeg не отдал видео: %s", msg[-300:])
+            hint = " (прокси не открыл соединение с сервером видео)" if net else ""
+            log.warning("ffmpeg не отдал видео с %s%s: %s", host, hint, msg[-300:])
             return _send(req, 502)
         try:
             req.send_response(200)

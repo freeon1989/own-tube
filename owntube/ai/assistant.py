@@ -28,7 +28,7 @@ SECTIONS = {
     "settings": "Настройки",
 }
 ACCOUNT_ACTIONS = ("like", "subscribe", "comment")
-ACTION_RE = re.compile(r"\[\[\s*(search|play|open|like|subscribe|comment)\s*:\s*([^\]\n]{1,200})\]\]", re.I)
+ACTION_RE = re.compile(r"\[\[\s*(search|play|open|like|subscribe|comment|more)\s*(?::\s*([^\]\n]{0,200}))?\]\]", re.I)
 MAX_MESSAGE = 4000
 CHARS_PER_TOKEN = 3  # грубо для русского текста
 
@@ -76,6 +76,9 @@ def system_prompt(aid: str, ctx: dict, can_account: bool = False) -> str:
         "[[search: запрос]] — найти видео на YouTube;",
         "[[play: ID]] — включить ролик (ID из 11 символов, только из списка на экране или из результатов поиска);",
         "[[open: раздел]] — открыть раздел: " + ", ".join(SECTIONS) + ".",
+        "[[more]] — подгрузить ещё видео на текущем экране.",
+        "Поиск, включение, открытие раздела и «ещё» программа выполняет сразу, без подтверждения, "
+        "поэтому ставь не больше одного такого действия на ответ.",
         "Не выдумывай ID роликов. Если не знаешь ID — предложи [[search: …]].",
         "Действия с аккаунтом (лайк, подписка, комментарий) сама не делаешь: можно предложить [[like: ID]] или "
         "[[subscribe: канал]], пользователь подтвердит сам." if can_account else
@@ -95,8 +98,10 @@ def parse_actions(text: str, allowed_ids: set[str] | None = None) -> tuple[str, 
     """Вырезает [[…]] из ответа. Возвращает (чистый текст, проверенные действия)."""
     actions = []
     for m in ACTION_RE.finditer(text or ""):
-        kind, arg = m.group(1).lower(), m.group(2).strip()
-        if kind == "search":
+        kind, arg = m.group(1).lower(), (m.group(2) or "").strip()
+        if kind == "more":
+            actions.append({"kind": "more"})
+        elif kind == "search":
             try:
                 actions.append({"kind": "search", "query": validate.clean_query(arg)})
             except ValueError:

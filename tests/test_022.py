@@ -28,7 +28,7 @@ FAKE_KEY = "sk-test-not-a-real-key-0000"
 PROXY_USER = "tester"
 PROXY_SECRET = "p@ss:w/rd#1"
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 2000 + b"\xff\xd9"
-HOSTS = ("api.fake-ai.test", "i.ytimg.com", "www.youtube.com")
+HOSTS = ("api.fake-ai.test", "i.ytimg.com", "www.youtube.com", "rr1.googlevideo.com")
 
 
 # ---------- подставной TLS-сервер для «внешних» адресов ----------
@@ -60,6 +60,13 @@ def tls(tmp_path_factory):
         def do_GET(self):
             if self.path == "/robots.txt":
                 return self._send(200, "text/plain", b"User-agent: *\n")
+            if self.path.startswith("/videoplayback"):
+                body = b"\x1aE\xdf\xa3" + b"v" * 65532
+                self.send_response(206)
+                self.send_header("Content-Type", "video/webm")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
             if self.path.startswith("/vi/"):
                 return self._send(200, "image/jpeg", JPEG)
             self._send(404, "text/plain", b"no")
@@ -266,13 +273,26 @@ def test_step_by_step_check(tmp_path, socks):
     out = diagnostics.run(good, lambda q, route, n: [{"id": "dQw4w9WgXcQ"}] * 3)
     assert out["ok"], out
     assert [s["name"] for s in out["steps"]] == ["Соединение с прокси (TCP)", "Рукопожатие и вход на прокси",
-                                                 "Доступ к youtube.com (HTTPS)", "Обложки (i.ytimg.com)", "Поиск yt-dlp"]
+                                                 "Доступ к youtube.com (HTTPS)", "Обложки (i.ytimg.com)", "Поиск"]
     bad = Route(proxy=socks.url, label="SOCKS", user=PROXY_USER, password="wrong")
     out = diagnostics.run(bad, None)
     assert not out["ok"] and "Неверный логин или пароль" in out["detail"] and len(out["steps"]) == 2
     dead = Route(proxy="socks5://127.0.0.1:9", label="SOCKS")
     out = diagnostics.run(dead, None)
     assert not out["ok"] and out["steps"][0]["ok"] is False
+
+
+def test_video_check_fetches_real_bytes_through_proxy(tmp_path, socks):
+    good = Route(proxy=socks.url, label="SOCKS", user=PROXY_USER, password=PROXY_SECRET)
+    streams = {"video": "https://rr1.googlevideo.com/videoplayback?ip=2001%3Adb8%3A%3A1&id=x", "height": 360, "container": "webm"}
+    out = diagnostics.run(good, lambda q, route, n: [{"id": "dQw4w9WgXcQ"}], lambda route: streams, lambda st: 70000)
+    names = [s["name"] for s in out["steps"]]
+    assert out["ok"], out
+    assert names[-3:] == ["Проверка видео: адрес потока", "Проверка видео: первые байты потока", "Проверка видео: встроенный плеер"]
+    detail = out["steps"][-2]["detail"]
+    assert "rr1.googlevideo.com" in detail and "HTTP 206" in detail and "IPv6" in detail and "ATYP 3" in detail
+    assert "2001" not in json.dumps(out) and "videoplayback" not in json.dumps(out)  # без адресов и IP в журнале
+    assert ("rr1.googlevideo.com", 443) in socks.targets
 
 
 def test_read_log_hides_secrets(tmp_path):
@@ -418,3 +438,122 @@ def test_media_server_retries_403_and_hides_stream_url(tmp_path, monkeypatch):
         urllib.request.urlopen(srv.video_url(sid, 0), timeout=20)
     assert e.value.code == 502 and "203.0.113.9" not in srv.last_error and "403" in srv.last_error
     srv.close()
+
+
+# ---------- 0.2.3: надёжное соединение через прокси ----------
+def _echo_server():
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+
+    def loop():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            c.sendall(b"hello")
+            c.close()
+
+    threading.Thread(target=loop, daemon=True).start()
+    return srv
+
+
+def _via(proxy, host, port, user=PROXY_USER, pwd=PROXY_SECRET):
+    from owntube import bridge
+    s, info = bridge.connect_via_proxy(proxy.url, host, port, user, pwd, timeout=5)
+    data = s.recv(5)
+    s.close()
+    return data, info
+
+
+def test_domain_name_is_sent_by_default_and_domain_only_proxy_works():
+    echo = _echo_server()
+    srv = Socks5Server(PROXY_USER, PROXY_SECRET, domain_only=True, hosts={"rr1.googlevideo.com": ("127.0.0.1", echo.getsockname()[1])})
+    data, info = _via(srv, "rr1.googlevideo.com", 443)
+    assert data == b"hello" and info["atyp"] == "domain" and srv.atyps == [3]
+    srv.close()
+
+
+def test_transient_refusal_is_retried(monkeypatch):
+    echo = _echo_server()
+    srv = Socks5Server(PROXY_USER, PROXY_SECRET, flaky={"rr1.googlevideo.com": 1},
+                       hosts={"rr1.googlevideo.com": ("127.0.0.1", echo.getsockname()[1])})
+    data, info = _via(srv, "rr1.googlevideo.com", 443)
+    assert data == b"hello" and info["tries"] == 2 and info["atyp"] == "domain"
+    srv.close()
+
+
+def test_falls_back_to_ipv4_when_proxy_cannot_resolve_name(monkeypatch):
+    from owntube import bridge
+    echo = _echo_server()
+    srv = Socks5Server(PROXY_USER, PROXY_SECRET, reject_domains={"rr1.googlevideo.com": 5})
+    monkeypatch.setattr(bridge, "_resolve_ipv4", lambda *a: (["127.0.0.1"], "тест"))
+    data, info = _via(srv, "rr1.googlevideo.com", echo.getsockname()[1])
+    assert data == b"hello" and info["atyp"] == "ipv4" and srv.atyps[-1] == 1 and srv.atyps[:2] == [3, 3]
+    srv.close()
+
+
+def test_proxy_rejecting_ip_literals_fails_cleanly_without_hanging(monkeypatch):
+    from owntube import bridge
+    srv = Socks5Server(PROXY_USER, PROXY_SECRET, domain_only=True, reject_domains={"rr1.googlevideo.com": 5})
+    monkeypatch.setattr(bridge, "_resolve_ipv4", lambda *a: (["127.0.0.1"], "тест"))
+    t = time.time()
+    with pytest.raises(bridge.SocksError) as e:
+        _via(srv, "rr1.googlevideo.com", 443)
+    assert time.time() - t < 8 and e.value.code in (5, 8)
+    srv.close()
+
+
+def test_connection_cap_does_not_break_thumbnail_burst(tmp_path, socks, tls, monkeypatch):
+    """24 обложек подряд при лимите прокси в 4 соединения: все приходят (очередь + повторы)."""
+    from owntube import bridge
+    monkeypatch.setattr(bridge, "_resolve_ipv4", lambda *a: ([], ""))
+    socks.max_conns = 4
+    api = _api(tmp_path, socks.url, PROXY_USER, PROXY_SECRET)
+    base = api.get_state()["media"]
+    results = []
+
+    def get(i):
+        u = f"https://i.ytimg.com/vi/id{i:09d}/mqdefault.jpg"
+        try:
+            with urllib.request.urlopen(base + "/img?u=" + urllib.request.quote(u, safe=""), timeout=30) as r:
+                results.append(len(r.read()))
+        except Exception as exc:
+            results.append(str(exc))
+
+    ths = [threading.Thread(target=get, args=(i,)) for i in range(24)]
+    [t.start() for t in ths]
+    [t.join() for t in ths]
+    assert results == [len(JPEG)] * 24, results
+    assert socks.peak_conns <= httpc.MAX_PARALLEL_PROXIED  # клиент сам ограничивает число одновременных соединений
+    api._shutdown()
+
+
+# ---------- 0.2.3: cookies окна входа и сводка для журнала ----------
+def test_webview2_cookie_conversion_and_summary():
+    from types import SimpleNamespace as NS
+    from owntube import login_window
+    good = NS(Name="remixsid", Value="SECRET-VALUE", Domain=".vk.com", Path="/", IsSecure=True, IsHttpOnly=True,
+              IsSession=False, Expires=1_900_000_000)
+    sess = NS(Name="remixlang", Value="0", Domain="vkvideo.ru", Path="", IsSecure=False, IsHttpOnly=False,
+              IsSession=True, Expires=-62135596800)
+    broken = NS(Name="x")
+    d1 = login_window.cookie_dict(good, lambda e: e)
+    d2 = login_window.cookie_dict(sess, lambda e: e)
+    assert d1["httponly"] is True and d1["expires"] == 1_900_000_000 and d1["domain"] == ".vk.com"
+    assert d2["expires"] == 0 and d2["path"] == "/"
+    assert login_window.cookie_dict(broken, lambda e: e) is None
+    text = accounts.summarize([d1, d2])
+    assert "vk.com: 1" in text and "vkvideo.ru: 1" in text and "remixsid" in text and "SECRET-VALUE" not in text
+    assert login_window._ready([d1], "vk") and not login_window._ready([d2], "vk")
+
+
+def test_vk_cookies_from_other_vk_domains_are_kept():
+    cookies = [{"name": "remixsid", "value": "a", "domain": ".vk.com", "path": "/", "secure": True, "expires": 0, "httponly": True},
+               {"name": "remixsid6", "value": "b", "domain": "vkvideo.ru", "path": "/", "secure": True, "expires": 0},
+               {"name": "other", "value": "c", "domain": ".example.com", "path": "/", "secure": True, "expires": 0}]
+    from owntube import login_window
+    kept = login_window._wanted(cookies, "vk")
+    assert {c["domain"] for c in kept} == {".vk.com", "vkvideo.ru"}

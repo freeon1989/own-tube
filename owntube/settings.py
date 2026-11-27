@@ -55,6 +55,15 @@ class Settings:
     theme: str = "assistant"  # assistant: тема выбранной помощницы
     assistant: str = "rei"
     download_dir: str = field(default_factory=default_download_dir)
+    ai_autorun: bool = True   # безопасные действия помощницы (поиск, включить, открыть раздел, ещё) выполняются сразу
+    voice_tts: bool = False   # озвучивать ответы помощницы
+    voice_rate: float = 1.0
+    voice_pitch: float = 1.0
+    voice_name: str = ""      # голос speechSynthesis; пусто — подобрать русский
+    stt_engine: str = "auto"  # auto | api | local
+    stt_model: str = "whisper-1"
+    stt_autosend: bool = True  # отправлять сообщение сразу после распознавания
+    whisper_dir: str = ""     # где лежит/куда ставить whisper.cpp; пусто — папка данных программы
 
     def public(self) -> dict:
         return asdict(self)
@@ -113,6 +122,29 @@ def _validated(raw: dict, strict: bool = False) -> Settings:
         return v
 
     take("sponsorblock", boolean)
+    take("ai_autorun", boolean)
+    take("voice_tts", boolean)
+    take("stt_autosend", boolean)
+
+    def ranged(lo, hi):
+        def f(v):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+                raise ValueError(f"Число должно быть от {lo} до {hi}")
+            return round(float(v), 2)
+        return f
+
+    take("voice_rate", ranged(0.5, 2.0))
+    take("voice_pitch", ranged(0.0, 2.0))
+    def short_text(maxlen, required=False):
+        def f(v):
+            if not isinstance(v, str) or (required and not v.strip()):
+                raise ValueError("Некорректное значение")
+            return validate.clean_text(v, maxlen)
+        return f
+
+    take("voice_name", short_text(160))
+    take("stt_engine", lambda v: validate.clean_choice(v, ("auto", "api", "local"), "способ распознавания"))
+    take("stt_model", short_text(80, required=True))
     take("vk_adult", boolean)
 
     def cats(v):
@@ -128,6 +160,14 @@ def _validated(raw: dict, strict: bool = False) -> Settings:
         return v.strip()
 
     take("mpv_path", path_text)
+
+    def whisper_dir(v):
+        v = path_text(v)
+        if v and not Path(v).is_absolute():
+            raise ValueError("Папка whisper должна быть полным путём")
+        return v
+
+    take("whisper_dir", whisper_dir)
 
     def dl_dir(v):
         v = path_text(v)

@@ -15,6 +15,7 @@ import select
 import socket
 import struct
 import threading
+import time
 from urllib.parse import urlsplit
 
 from . import validate
@@ -27,7 +28,11 @@ MAX_HEADER = 8192
 
 
 class SocksError(OSError):
-    pass
+    """Ошибка прокси. code — ответ SOCKS5 (REP), если он был: 1 сбой, 2 запрещено, 3 сеть, 4 хост, 5 отказ, 8 тип адреса."""
+
+    def __init__(self, message: str, code: int | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -41,8 +46,11 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
 
 
 def socks_connect(proxy: str, host: str, port: int, timeout: float = 15,
-                  user: str = "", password: str = "") -> socket.socket:
-    """TCP к host:port через SOCKS4a/5. Для SOCKS5 с логином — RFC 1929. Ошибки без секретов."""
+                  user: str = "", password: str = "", ip: str | None = None) -> socket.socket:
+    """TCP к host:port через SOCKS4a/5. Для SOCKS5 с логином — RFC 1929. Ошибки без секретов.
+
+    По умолчанию имя хоста уходит прокси как есть (ATYP=3, как socks5h). ip — запасной путь: прокси получает адрес
+    (ATYP=1/4), если сам не смог соединиться по имени."""
     p = urlsplit(proxy)
     scheme = (p.scheme or "").lower()
     if not p.hostname or not p.port:
@@ -72,13 +80,18 @@ def socks_connect(proxy: str, host: str, port: int, timeout: float = 15,
                     raise SocksError("Неверный логин или пароль")
             elif method != 0x00:
                 raise SocksError("SOCKS5: прокси требует логин или не поддерживает подключение")
-            name = host.encode("idna")
-            if len(name) > 255:
-                raise SocksError("слишком длинное имя хоста")
-            s.sendall(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + struct.pack(">H", port))
+            if ip:
+                addr = ipaddress.ip_address(ip)
+                atyp = b"\x01" if addr.version == 4 else b"\x04"
+                s.sendall(b"\x05\x01\x00" + atyp + addr.packed + struct.pack(">H", port))
+            else:
+                name = host.encode("idna")
+                if len(name) > 255:
+                    raise SocksError("слишком длинное имя хоста")
+                s.sendall(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + struct.pack(">H", port))
             head = _recv_exact(s, 4)
             if head[1] != 0:
-                raise SocksError(f"SOCKS5: отказ подключения (код {head[1]})")
+                raise SocksError(f"SOCKS5: отказ подключения (код {head[1]})", head[1])
             atyp = head[3]
             if atyp == 1:
                 _recv_exact(s, 4 + 2)
@@ -89,8 +102,11 @@ def socks_connect(proxy: str, host: str, port: int, timeout: float = 15,
             else:
                 raise SocksError("SOCKS5: неизвестный ответ")
         elif scheme in ("socks4", "socks4a"):
-            s.sendall(b"\x04\x01" + struct.pack(">H", port) + b"\x00\x00\x00\x01" + b"\x00"
-                      + host.encode("idna") + b"\x00")
+            if ip and ipaddress.ip_address(ip).version == 4:
+                s.sendall(b"\x04\x01" + struct.pack(">H", port) + ipaddress.ip_address(ip).packed + b"\x00")
+            else:
+                s.sendall(b"\x04\x01" + struct.pack(">H", port) + b"\x00\x00\x00\x01" + b"\x00"
+                          + host.encode("idna") + b"\x00")
             resp = _recv_exact(s, 8)
             if resp[1] != 0x5A:
                 raise SocksError("SOCKS4: отказ подключения")
@@ -211,10 +227,8 @@ class Bridge:
             threading.Thread(target=self._handle, args=(client,), daemon=True).start()
 
     def _upstream(self, host: str, port: int):
-        scheme = (urlsplit(self.upstream).scheme or "").lower()
-        if scheme in ("http", "https"):
-            return http_connect(self.upstream, host, port, user=self._user, password=self._password)
-        return socks_connect(self.upstream, host, port, user=self._user, password=self._password)
+        sock, _ = connect_via_proxy(self.upstream, host, port, self._user, self._password)
+        return sock
 
     def _handle(self, client: socket.socket) -> None:
         try:
@@ -247,7 +261,7 @@ class Bridge:
             client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
             _pipe(client, upstream)
         except Exception as exc:  # одно соединение не должно ронять мост
-            log.debug("Мост: %s", validate.redact(str(exc)))
+            log.warning("Мост: %s", validate.redact(str(exc))[:160])
             try:
                 client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
             except OSError:
@@ -256,3 +270,140 @@ class Bridge:
                 client.close()
             except OSError:
                 pass
+
+
+# ---------- надёжное соединение через прокси ----------
+_RETRY_CODES = (1, 3, 4, 5, 6)         # «сбой», «сеть недоступна», «хост», «отказ», «TTL»
+_NOT_IP_CODES = (7, 8)                  # команда / тип адреса не поддерживаются
+_dns_cache: dict[str, tuple[float, list[str]]] = {}
+_dns_lock = threading.Lock()
+_fail_log: dict[str, float] = {}
+DNS_TTL = 600
+_slots = threading.BoundedSemaphore(10)  # одновременных рукопожатий с прокси (у 3proxy и подобных есть лимиты)
+
+
+def _doh_a(proxy: str, user: str, password: str, host: str) -> list[str]:
+    """A-записи, как их видит сам прокси: DNS-over-HTTPS по имени cloudflare-dns.com через тот же прокси."""
+    import http.client
+    import json
+    import ssl
+
+    raw = _connect_once(proxy, user, password, "cloudflare-dns.com", 443, 8, None)
+    try:
+        ctx = ssl.create_default_context()
+        tls = ctx.wrap_socket(raw, server_hostname="cloudflare-dns.com")
+        conn = http.client.HTTPSConnection("cloudflare-dns.com", 443, timeout=8, context=ctx)
+        conn.sock = tls
+        conn.request("GET", f"/dns-query?name={host}&type=A", headers={"Accept": "application/dns-json"})
+        data = json.loads(conn.getresponse().read(65536).decode("utf-8", "replace"))
+        conn.close()
+    finally:
+        try:
+            raw.close()
+        except OSError:
+            pass
+    out = []
+    for a in data.get("Answer") or []:
+        if a.get("type") == 1:
+            try:
+                if ipaddress.ip_address(a.get("data")).version == 4:
+                    out.append(a["data"])
+            except ValueError:
+                continue
+    return out
+
+
+def _local_a(host: str) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return []
+    return list(dict.fromkeys(i[4][0] for i in infos))
+
+
+def _resolve_ipv4(proxy: str, user: str, password: str, host: str) -> tuple[list[str], str]:
+    now = time.time()
+    with _dns_lock:
+        hit = _dns_cache.get(host)
+        if hit and now - hit[0] < DNS_TTL:
+            return hit[1], "кэш"
+    ips: list[str] = []
+    how = ""
+    try:
+        ips, how = _doh_a(proxy, user, password, host), "DoH через прокси"
+    except Exception as exc:
+        log.debug("DoH через прокси не сработал: %s", validate.redact(str(exc))[:100])
+    if not ips:
+        ips, how = _local_a(host), "локальный DNS"
+    if ips:
+        with _dns_lock:
+            _dns_cache[host] = (now, ips)
+    return ips, how
+
+
+def _connect_once(proxy, user, password, host, port, timeout, ip):
+    scheme = (urlsplit(proxy).scheme or "").lower()
+    if scheme in ("http", "https"):
+        return http_connect(proxy, host, port, timeout=timeout, user=user, password=password)
+    return socks_connect(proxy, host, port, timeout=timeout, user=user, password=password, ip=ip)
+
+
+def _note(host: str, text: str) -> None:
+    """Одна строка в журнал на хост не чаще раза в 30 секунд: без адресов и секретов."""
+    now = time.time()
+    if now - _fail_log.get(host + text[:20], 0) > 30:
+        _fail_log[host + text[:20]] = now
+        log.warning("Прокси: %s", text)
+
+
+LAST: dict[str, dict] = {}   # хост -> как удалось соединиться в последний раз (для журнала и «Проверить связь»)
+
+
+def connect_via_proxy(proxy: str, host: str, port: int, user: str = "", password: str = "",
+                      timeout: float = 20) -> tuple[socket.socket, dict]:
+    sock, info = _connect_via_proxy(proxy, host, port, user, password, timeout)
+    LAST[host] = dict(info)
+    return sock, info
+
+
+def _connect_via_proxy(proxy: str, host: str, port: int, user: str = "", password: str = "",
+                       timeout: float = 20) -> tuple[socket.socket, dict]:
+    """Соединение с host:port через прокси. Возвращает (сокет, сведения о способе).
+
+    1) имя хоста целиком (ATYP=3); 2) при временном отказе — повтор; 3) если прокси всё равно не смог дойти
+    (REP 4/5…), адрес берём сами (DoH через этот же прокси, иначе локальный DNS) и отдаём ему IPv4 (ATYP=1)."""
+    info = {"host": host, "port": port, "atyp": "domain", "tries": 1}
+    with _slots:
+        try:
+            return _connect_once(proxy, user, password, host, port, timeout, None), info
+        except SocksError as exc:
+            first = exc
+        except socket.timeout as exc:
+            first = SocksError("таймаут соединения с прокси")
+            first.__cause__ = exc
+        if getattr(first, "code", None) is None or first.code not in _RETRY_CODES:
+            if not isinstance(first.__cause__, socket.timeout):
+                raise first
+        time.sleep(0.4)
+        info["tries"] = 2
+        try:
+            return _connect_once(proxy, user, password, host, port, timeout, None), info
+        except OSError as exc:
+            second = exc
+        scheme = (urlsplit(proxy).scheme or "").lower()
+        if scheme.startswith("socks"):
+            ips, how = _resolve_ipv4(proxy, user, password, host)
+            for ip in ips[:3]:
+                info.update(atyp="ipv4", tries=info["tries"] + 1, dns=how)
+                try:
+                    return _connect_once(proxy, user, password, host, port, timeout, ip), info
+                except SocksError as exc:
+                    if exc.code in _NOT_IP_CODES:
+                        break
+                    second = exc
+                except OSError as exc:
+                    second = exc
+        code = getattr(second, "code", None)
+        _note(host, f"не удалось открыть {host}:{port} (по имени: код {getattr(first, 'code', '?')}, "
+                    f"повтор: код {code if code is not None else '?'}, попыток {info['tries']})")
+        raise second

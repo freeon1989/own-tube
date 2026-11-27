@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 from . import validate, ytdl
 from .network import Route
 from .search import format_duration, format_views
@@ -49,6 +51,7 @@ import threading as _threading
 import time as _time
 from urllib.parse import urlencode as _urlencode
 
+log = logging.getLogger("owntube.vk")
 VK_CLIENT_ID = "52461373"   # публичный id веб-клиента vkvideo.ru
 VK_APP_ID = "6287487"
 VK_API = "https://api.vkvideo.ru/method/"
@@ -65,12 +68,7 @@ def _post(url: str, form: dict, route: Route, cookie: str = "") -> dict:
     headers = dict(_ORIGIN)
     if cookie:
         headers["Cookie"] = cookie
-    resp = httpc.open_url("POST", url, route, headers, _urlencode(form).encode(), timeout=20)
-    try:
-        raw = resp.read(4 * 1024 * 1024)
-        status = resp.status
-    finally:
-        resp.close()
+    status, _, raw = httpc.fetch("POST", url, route, headers, _urlencode(form).encode(), limit=4 * 1024 * 1024, timeout=20)
     if status != 200:
         raise ValueError(f"VK ответил кодом {status}")
     try:
@@ -124,13 +122,18 @@ def parse_search(resp: dict) -> list[dict]:
     for p in resp.get("profiles") or []:
         if isinstance(p, dict) and isinstance(p.get("id"), int):
             names[p["id"]] = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
-    out = []
-    for v in resp.get("videos") or []:
+    out, seen = [], set()
+    pool = list(resp.get("videos") or [])
+    for c in resp.get("catalog_videos") or []:
+        if isinstance(c, dict) and isinstance(c.get("video"), dict):
+            pool.append(c["video"])
+    for v in pool:
         if not isinstance(v, dict) or not isinstance(v.get("owner_id"), int) or not isinstance(v.get("id"), int):
             continue
         vk_id = f"{v['owner_id']}_{v['id']}"
-        if not validate.is_vk_id(vk_id):
+        if not validate.is_vk_id(vk_id) or vk_id in seen:
             continue
+        seen.add(vk_id)
         out.append({"source": "vk", "id": vk_id,
                     "title": validate.clean_text(v.get("title"), 300) or "Без названия",
                     "channel": validate.clean_text(names.get(v["owner_id"]), 120), "channel_id": "",
@@ -139,24 +142,46 @@ def parse_search(resp: dict) -> list[dict]:
     return out
 
 
-def search(query: str, route: Route, cookie: str = "", adult: bool = False, count: int = 30) -> dict:
-    """Поиск роликов VK. Без входа — гостевой доступ; 18+ — только после входа в VK."""
-    q = validate.clean_query(query)
-    token, signed = "", False
+def _token(route: Route, cookie: str) -> tuple[str, bool]:
     if cookie:
         try:
-            token = user_token(route, cookie)
-            signed = bool(token)
-        except Exception:
-            token = ""
-    if not token:
-        token = anonymous_token(route)
-    form = {"q": q, "access_token": token, "count": str(max(1, min(count, 50)))}
-    if adult and signed:
-        form["adult"] = "1"
-    data = _post(VK_API + f"catalog.getVideoSearchWeb2?v={VK_V}&client_id={VK_CLIENT_ID}", form, route)
+            tok = user_token(route, cookie)
+            if tok:
+                return tok, True
+            log.info("VK: вход по cookies не дал токен пользователя, поиск идёт как у гостя")
+        except Exception as exc:
+            log.info("VK: токен пользователя не получен (%s), поиск идёт как у гостя", validate.redact(str(exc))[:100])
+    return anonymous_token(route), False
+
+
+def _check(data: dict) -> dict:
     if "error" in data:
         msg = (data.get("error") or {}).get("error_msg") if isinstance(data.get("error"), dict) else ""
         raise ValueError("VK: " + validate.clean_text(msg or "ошибка поиска", 200))
-    return {"items": parse_search(data.get("response") or {}), "signed_in": signed,
-            "adult": bool(adult and signed)}
+    return data.get("response") or {}
+
+
+def _cursor(resp: dict) -> dict | None:
+    secs = ((resp.get("catalog") or {}).get("sections") or [{}])
+    sec = secs[0] if secs and isinstance(secs[0], dict) else {}
+    section = resp.get("section") if isinstance(resp.get("section"), dict) else sec
+    nxt, sid = section.get("next_from"), section.get("id") or sec.get("id")
+    if isinstance(nxt, str) and nxt and isinstance(sid, str) and sid:
+        return {"k": "vk", "sec": sid[:600], "t": nxt[:2000]}
+    return None
+
+
+def search(query: str, route: Route, cookie: str = "", adult: bool = False, count: int = 30, cursor: dict | None = None) -> dict:
+    """Поиск роликов VK. Без входа — гостевой доступ; 18+ — только после входа в VK.
+    cursor — «ещё»: следующая страница раздела (catalog.getSection)."""
+    token, signed = _token(route, cookie)
+    if cursor:
+        form = {"access_token": token, "section_id": cursor["sec"], "start_from": cursor["t"]}
+        resp = _check(_post(VK_API + f"catalog.getSection?v={VK_V}&client_id={VK_CLIENT_ID}", form, route))
+    else:
+        q = validate.clean_query(query)
+        form = {"q": q, "access_token": token, "count": str(max(1, min(count, 50)))}
+        if adult and signed:
+            form["adult"] = "1"
+        resp = _check(_post(VK_API + f"catalog.getVideoSearchWeb2?v={VK_V}&client_id={VK_CLIENT_ID}", form, route))
+    return {"items": parse_search(resp), "signed_in": signed, "adult": bool(adult and signed), "more": _cursor(resp)}

@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import threading
+import time
 
 from . import validate, ytdl
 from .network import Route, RouteError
@@ -90,14 +92,24 @@ def find_mpv(configured: str = "") -> str:
     return found
 
 
+def alt_codec(codec: str) -> str:
+    """Другой кодек для повторной попытки: если не открылся основной формат, пробуем H.264/MP4 (или авто)."""
+    return "auto" if codec in ("h264", "avc") else "h264"
+
+
 def resolve_streams(source: str, item_id: str, quality: str, route: Route = Route(), codec: str = "auto",
-                    embedded: bool = False) -> dict:
-    """Возвращает {title, video, audio|None, user_agent, referer, ...}. Все адреса проверены."""
+                    embedded: bool = False, ipv4: bool = False) -> dict:
+    """Возвращает {title, video, audio|None, user_agent, referer, ...}. Все адреса проверены.
+
+    ipv4=True: запрос идёт только по IPv4 (адрес потока привязан к IP выдачи; если IPv6 у компьютера не работает до серверов видео,
+    адрес, выданный по IPv6, даёт 403)."""
     import yt_dlp
 
     url = validate.item_url(source, item_id)
     fmt = embedded_selector(quality, codec) if embedded else format_selector(quality, codec)
     opts = ytdl.base_options(route, format=fmt)
+    if ipv4 and route.direct:
+        opts["source_address"] = "0.0.0.0"
     try:
         with ytdl.YDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -190,3 +202,50 @@ class Player:
         p, self._proc = self._proc, None
         if p and p.poll() is None:
             p.terminate()
+
+
+class StreamCache:
+    """Готовые адреса потоков на короткое время: повторное открытие и «подготовка» следующего ролика мгновенны.
+
+    Адреса YouTube привязаны к IP и живут часы; держим 20 минут. Параллельные запросы одного ролика ждут один разбор."""
+    TTL = 20 * 60
+    MAX = 40
+
+    def __init__(self):
+        self._d: dict[tuple, tuple[float, dict]] = {}
+        self._busy: dict[tuple, threading.Event] = {}
+        self._lock = threading.Lock()
+
+    def peek(self, key: tuple) -> dict | None:
+        with self._lock:
+            hit = self._d.get(key)
+            return dict(hit[1]) if hit and time.time() - hit[0] < self.TTL else None
+
+    def get(self, key: tuple, producer, fresh: bool = False) -> tuple[dict, bool]:
+        """(потоки, из_кэша)."""
+        while True:
+            with self._lock:
+                hit = self._d.get(key)
+                if hit and not fresh and time.time() - hit[0] < self.TTL:
+                    return dict(hit[1]), True
+                ev = self._busy.get(key)
+                if ev is None:
+                    self._busy[key] = threading.Event()
+                    break
+            ev.wait(60)
+            fresh = False
+        try:
+            value = producer()
+            with self._lock:
+                self._d[key] = (time.time(), value)
+                if len(self._d) > self.MAX:
+                    for k, _ in sorted(self._d.items(), key=lambda kv: kv[1][0])[: len(self._d) - self.MAX]:
+                        self._d.pop(k, None)
+            return dict(value), False
+        finally:
+            with self._lock:
+                self._busy.pop(key).set()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()

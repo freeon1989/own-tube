@@ -7,14 +7,16 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
 import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
-from . import __version__, accounts as acc_mod, diagnostics, search as yt, sponsorblock, takeout, validate, vk, ytdl
+from . import __version__, accounts as acc_mod, diagnostics, lists, voice, search as yt, sponsorblock, takeout, validate, vk, ytdl
 from .ai import assistant as ai_assistant
 from . import player as player_mod
 from .db import Store, clean_item
@@ -58,7 +60,8 @@ class Api:
             lambda: self._store.value.proxy_user,
             self._store.proxy_password,
         )
-        self._search = search_fn or yt.search
+        self._search_fn = search_fn
+        self._cache = lists.FeedCache(self._store.dir / "feedcache.json")
         self._lock = threading.Lock()
         self._window = None
         self._dl = Downloader(self._db, lambda: self._store.value, self._routes.current) if start_downloader else None
@@ -67,6 +70,10 @@ class Api:
         self._media = None
         self._jobs = ai_assistant.Jobs()
         self._watch: dict = {}
+        self._streamcache = player_mod.StreamCache()
+        self._installer = voice.Installer()
+        self._stt_lock = threading.Lock()
+        self._prefetching: set = set()
 
     def _media_server(self):
         with self._lock:
@@ -93,15 +100,59 @@ class Api:
     @safe
     def save_settings(self, patch):
         with self._lock:
-            s = self._store.update(patch)
+            self._store.update(patch)
         return {"settings": self._store.export()}
+
+    def warmup(self) -> None:
+        """Фоновая подготовка при запуске: импорт yt-dlp, deno, готовые соединения с YouTube через прокси."""
+        def run():
+            t = time.monotonic()
+            try:
+                importlib.import_module("yt_dlp")  # первый импорт занимает ~0,5 с
+                route = self._routes.current()
+                from . import httpc
+                for url in ("https://www.youtube.com/robots.txt", "https://i.ytimg.com/generate_204"):
+                    try:
+                        httpc.fetch("GET", url, route, limit=64 * 1024, timeout=10, attempts=1)
+                    except Exception as exc:
+                        log.info("Прогрев соединения не удался: %s", validate.redact(str(exc))[:100])
+                deno = find_tool("deno")
+                if deno:
+                    subprocess.run([deno, "--version"], capture_output=True, timeout=20, shell=False,
+                                   creationflags=0x08000000 if sys.platform.startswith("win") else 0)
+            except Exception as exc:
+                log.info("Прогрев: %s", validate.redact(str(exc))[:100])
+            log.info("Прогрев занял %.1f с", time.monotonic() - t)
+        threading.Thread(target=run, name="owntube-warmup", daemon=True).start()
+
+    def _diag_search(self, q, route, n=3):
+        if self._search_fn:
+            return self._search_fn(q, route)[:n], "yt-dlp"
+        return lists.first("search", q, route)[0][:n], "быстрый поиск YouTube"
+
+    def _diag_pipe(self, streams: dict, nbytes: int = 128 * 1024):
+        """Те же потоки через встроенный плеер (ffmpeg + локальный сервер): сколько байт пришло в <video>."""
+        import urllib.request
+        media = self._media_server()
+        sid = media.add_session(streams, exclusive=False)
+        try:
+            with urllib.request.urlopen(media.video_url(sid, 0), timeout=60) as r:
+                got = r.read(nbytes)
+            return len(got)
+        finally:
+            media.drop_session(sid)
+
+    def _diag_video(self, route, codec="auto"):
+        """Реальный поток тестового ролика (через yt-dlp) для шага «Проверка видео»."""
+        return player_mod.resolve_streams("yt", "dQw4w9WgXcQ", "360", route, codec, embedded=True)
 
     @safe
     def check_route(self):
         """Проверка по шагам: TCP, вход на прокси, youtube.com, обложки, поиск yt-dlp."""
         if not isinstance(self._routes, ManualProxy):
             return self._routes.check()  # свой провайдер маршрута (например, будущий VPN) проверяет себя сам
-        out = diagnostics.run(self._routes.current(), self._search)
+        out = diagnostics.run(self._routes.current(), self._diag_search,
+                              None if self._search_fn else self._diag_video, None if self._search_fn else self._diag_pipe)
         for st in out["steps"]:
             log.info("Проверка связи: %s — %s (%s)", st["name"], "OK" if st["ok"] else "сбой", st["detail"])
         return out
@@ -131,43 +182,91 @@ class Api:
         return {"lines": out, "path_hint": "own-tube.log в папке данных программы"}
 
     # --- ленты и поиск ---
+    def _search_items(self, q: str, route) -> list:
+        if self._search_fn:
+            return self._search_fn(q, route)
+        return lists.first("search", q, route)[0]
+
+    def _cached_list(self, key: str, mode: str, producer) -> dict:
+        """mode='cache' — отдать сохранённый список сразу (или items=None); иначе загрузить свежий и сохранить."""
+        if mode == "cache":
+            c = self._cache.get(key)
+            if not c:
+                return {"items": None}
+            more = c.get("more")
+            if more and more.get("k") == "mem" and not lists.mem_has(more.get("key", "")):
+                more = None
+            return {"items": c["items"], "more": more, "stale": True, "age": int(time.time() - c["ts"]), **(c.get("extra") or {})}
+        items, cur, extra = producer()
+        self._cache.put(key, items, cur, extra)
+        return {"items": items, "more": cur, **extra}
+
     @safe
-    def search(self, query, source="yt"):
+    def search(self, query, source="yt", more=None, mode="fresh"):
         source = validate.clean_source(source)
         q = validate.clean_query(query)
+        mode = "cache" if mode == "cache" else "fresh"
         route = self._routes.current()
         if source == "vk":
             if validate.parse_vk_link(q):
-                return {"items": [vk.open_link(q, route)]}
+                return {"items": [vk.open_link(q, route)], "more": None}
             cookie = self._accounts.cookie_header("vk", "login.vk.com")
-            res = vk.search(q, route, cookie, adult=self._store.value.vk_adult)
-            return res
+            cur = lists.clean_cursor(more)
+            if cur and cur["k"] != "vk":
+                raise ValueError("Некорректное продолжение списка")
+            if cur:
+                return vk.search(q, route, cookie, adult=self._store.value.vk_adult, cursor=cur)
+            def produce():
+                res = vk.search(q, route, cookie, adult=self._store.value.vk_adult)
+                return res["items"], res.get("more"), {"signed_in": res.get("signed_in"), "adult": res.get("adult")}
+            return self._cached_list("vk:" + q.lower(), mode, produce)
         vid = validate.parse_youtube_link(q)
         if vid:
             return {"items": [{"source": "yt", "id": vid, "title": "Видео по ссылке", "channel": "",
                                "channel_id": "", "duration": "", "views": "", "live": False,
-                               "thumb": validate.thumb_url(vid)}]}
-        return {"items": self._search(q, route)}
+                               "thumb": validate.thumb_url(vid)}], "more": None}
+        if self._search_fn:
+            return {"items": self._search_fn(q, route), "more": None}
+        cur = lists.clean_cursor(more)
+        if cur:
+            items, nxt = lists.more(cur, route)
+            return {"items": items, "more": nxt}
+        def produce_yt():
+            items, nxt, _ = lists.first("search", q, route)
+            return items, nxt, {}
+        return self._cached_list("search:" + q.lower(), mode, produce_yt)
 
     @safe
-    def feed(self, kind, arg=None):
+    def feed(self, kind, arg=None, more=None, mode="fresh"):
         route = self._routes.current()
-        if kind == "home":
-            subs = {s["channel_id"]: s["title"] for s in self._db.subscriptions()}
-            if subs:
-                return {"items": yt.subscriptions_feed(subs, route, per_channel=3, limit=36), "from": "subs"}
-            q, sp = yt.HOME_FALLBACK
-            return {"items": yt.search(q, route, 24, sp), "from": "popular"}
-        if kind == "subs":
-            subs = {s["channel_id"]: s["title"] for s in self._db.subscriptions()}
-            return {"items": yt.subscriptions_feed(subs, route) if subs else []}
-        if kind == "shorts":
-            return {"items": yt.shorts(route)}
-        if kind == "category":
-            return {"items": yt.category(str(arg), route)}
-        if kind == "channel":
-            return {"items": yt.channel_videos(str(arg), route)}
-        raise ValueError("Неизвестный раздел")
+        mode = "cache" if mode == "cache" else "fresh"
+        if kind not in ("home", "subs", "shorts", "category", "channel"):
+            raise ValueError("Неизвестный раздел")
+        cur = lists.clean_cursor(more)
+        if cur:
+            items, nxt = lists.more(cur, route)
+            return {"items": items, "more": nxt}
+        subs = {s["channel_id"]: s["title"] for s in self._db.subscriptions()} if kind in ("home", "subs") else None
+        sig = str(abs(hash(tuple(sorted(subs)))) % 10**8) if subs else ""
+        key = f"{kind}:{arg or ''}:{sig}"
+
+        def produce():
+            items, nxt, origin = lists.first(kind, arg, route, subs)
+            return items, nxt, ({"from": origin} if origin else {})
+        return self._cached_list(key, mode, produce)
+
+    @safe
+    def more(self, cursor, source="yt", query=""):
+        """«Показать ещё» для любого списка по курсору, который вернул search/feed."""
+        cur = lists.clean_cursor(cursor)
+        if not cur:
+            return {"items": [], "more": None}
+        route = self._routes.current()
+        if cur["k"] == "vk":
+            cookie = self._accounts.cookie_header("vk", "login.vk.com")
+            return vk.search(validate.clean_query(query or "видео"), route, cookie, adult=self._store.value.vk_adult, cursor=cur)
+        items, nxt = lists.more(cur, route)
+        return {"items": items, "more": nxt}
 
     # --- библиотека (локально) ---
     @safe
@@ -302,28 +401,52 @@ class Api:
         return {"summary": takeout.import_path(p, self._db)}
 
     # --- встроенный плеер ---
+    def _streams(self, v: dict, quality: str, route, codec: str, fresh: bool = False, ipv4: bool = False) -> tuple[dict, bool]:
+        key = (v["source"], v["id"], quality, codec, route.proxy or "", route.user or "", ipv4)
+        return self._streamcache.get(
+            key, lambda: player_mod.resolve_streams(v["source"], v["id"], quality, route, codec, embedded=True,
+                                                    **({"ipv4": True} if ipv4 else {})), fresh)
+
+    def _effective_quality(self, quality, short: bool) -> str:
+        q = validate.clean_quality(quality) if quality is not None else self._store.value.quality
+        if short and q in ("best", "1080"):
+            return "720"  # вертикальным роликам больше не нужно, зато открываются заметно быстрее
+        return q
+
     @safe
-    def watch(self, item, quality=None):
-        """Видео внутри окна: yt-dlp выбирает потоки, ffmpeg без перекодирования отдаёт их в <video>."""
+    def watch(self, item, quality=None, short=False):
+        """Видео внутри окна: yt-dlp выбирает потоки, ffmpeg без перекодирования отдаёт их в <video>.
+        short=True — режим Shorts: сеансы не сбрасываются, соседние ролики могут быть подготовлены заранее."""
         v = clean_item(item)
         s = self._store.value
         if not find_tool("ffmpeg"):
             raise ValueError("Для встроенного плеера нужен ffmpeg (папка tools рядом с программой)")
-        q = validate.clean_quality(quality) if quality is not None else s.quality
+        short = bool(short)
+        q = self._effective_quality(quality, short)
         route = self._routes.current()
-        streams = player_mod.resolve_streams(v["source"], v["id"], q, route, s.codec, embedded=True)
+        t0 = time.monotonic()
+        streams, cached = self._streams(v, q, route, s.codec)
         if streams.get("live"):
             raise ValueError("Прямые эфиры пока открываются только в отдельном окне (mpv)")
+        log.info("Потоки для %s: %s, %.1f с, %s", v["source"], "из кэша" if cached else "получены",
+                 time.monotonic() - t0, f"{streams.get('height') or '?'}p {streams.get('container')}")
         segs = []
-        if v["source"] == "yt" and s.sponsorblock:
+        if v["source"] == "yt" and s.sponsorblock and not short:
             try:
                 segs = sponsorblock.segments(v["id"], s.sb_categories, route)
             except Exception:
                 segs = []
         media = self._media_server()
-        sid = media.add_session(streams)
+
+        def refresh():
+            alt = player_mod.alt_codec(s.codec)
+            cur = self._routes.current()
+            return self._streams(v, q, cur, alt, fresh=True, ipv4=cur.direct)[0]
+
+        sid = media.add_session(streams, refresh=refresh, exclusive=not short)
         with self._lock:
-            self._watch = {"sid": sid, "item": v}
+            if not short:
+                self._watch = {"sid": sid, "item": v}
         title = streams.get("title") or v["title"]
         self._db.add_history({**item, **v, "title": title})
         return {"sid": sid, "url": media.video_url(sid, 0), "base": media.base, "title": title,
@@ -331,7 +454,38 @@ class Api:
                 "channel_id": streams.get("channel_id") or v.get("channel_id") or "",
                 "duration": streams.get("duration") or 0, "height": streams.get("height") or 0,
                 "container": streams.get("container"), "segments": [[a, b] for a, b in segs],
-                "quality": q}
+                "quality": q, "cached": cached}
+
+    @safe
+    def prefetch(self, item, short=False):
+        """Заранее разобрать потоки ролика (наведение на карточку, следующий Short). Ничего не открывает."""
+        v = clean_item(item)
+        if v["source"] not in ("yt", "vk") or not find_tool("ffmpeg"):
+            return {"started": False}
+        q = self._effective_quality(None, bool(short))
+        route = self._routes.current()
+        key = (v["source"], v["id"])
+        with self._lock:
+            if key in self._prefetching or len(self._prefetching) >= 3:
+                return {"started": False}
+            self._prefetching.add(key)
+
+        def run():
+            try:
+                self._streams(v, q, route, self._store.value.codec)
+            except Exception as exc:
+                log.debug("Подготовка %s не удалась: %s", v["id"], validate.redact(str(exc))[:100])
+            finally:
+                with self._lock:
+                    self._prefetching.discard(key)
+        threading.Thread(target=run, name="owntube-prefetch", daemon=True).start()
+        return {"started": True}
+
+    @safe
+    def drop_watch(self, sid):
+        if isinstance(sid, str) and sid:
+            self._media_server().drop_session(sid)
+        return {}
 
     @safe
     def seek_url(self, sid, start):
@@ -357,7 +511,7 @@ class Api:
             res = vk.search(v["title"][:80] or "видео", self._routes.current(), cookie)
             return {"items": [x for x in res["items"] if x["id"] != v["id"]][:16]}
         q = (v["channel"] + " " + v["title"]).strip()[:100] or v["id"]
-        items = self._search(validate.clean_query(q), self._routes.current())
+        items = self._search_items(validate.clean_query(q), self._routes.current())
         return {"items": [x for x in items if x.get("id") != v["id"]][:16]}
 
     @safe
@@ -437,6 +591,78 @@ class Api:
     def assistant_clear(self):
         self._db.chat_clear(self._store.value.assistant)
 
+    # --- голос: распознавание речи ---
+    def _whisper_dir(self) -> Path:
+        d = self._store.value.whisper_dir
+        return Path(d) if d else voice.default_dir(self._store.dir)
+
+    @safe
+    def stt_status(self):
+        d = self._whisper_dir()
+        try:
+            cfg = self._active_ai()
+            from .ai.providers import kind_of
+            api_ok = kind_of(cfg.get("base_url") or "") == "openai"
+        except ValueError:
+            api_ok = False
+        return {"local": voice.local_ready(d), "dir": str(d), "install": self._installer.snapshot(), "api_possible": api_ok,
+                "ffmpeg": bool(find_tool("ffmpeg")), "engine": self._store.value.stt_engine,
+                "size_mb": round(voice.WHISPER_MODEL["size"] / 1048576) + round(voice.WHISPER_ZIP["size"] / 1048576)}
+
+    @safe
+    def stt_install(self):
+        started = self._installer.start(self._whisper_dir(), self._routes.current())
+        return {"started": started, "install": self._installer.snapshot()}
+
+    @safe
+    def stt_transcribe(self, audio, mime=""):
+        """audio — запись с микрофона в base64 (WebM/Opus). Возвращает {text, engine}."""
+        import base64
+        import binascii
+        if not isinstance(audio, str) or not audio or len(audio) > voice.MAX_AUDIO * 4 // 3 + 16:
+            raise ValueError("Запись пустая или слишком длинная")
+        try:
+            raw = base64.b64decode(audio, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("Запись повреждена") from exc
+        ffmpeg = find_tool("ffmpeg")
+        if not ffmpeg:
+            raise ValueError("Для распознавания речи нужен ffmpeg (папка tools рядом с программой)")
+        s = self._store.value
+        route = self._routes.current()
+        local_ok = voice.local_ready(self._whisper_dir())
+        engine = s.stt_engine
+        if engine == "auto":
+            engine = "local" if local_ok else "api"
+        if not self._stt_lock.acquire(blocking=False):
+            raise ValueError("Предыдущая запись ещё распознаётся")
+        wav = None
+        try:
+            wav = voice.to_wav(ffmpeg, raw, voice.temp_dir(self._store.dir))
+            t = time.monotonic()
+            if engine == "local":
+                text = voice.transcribe_local(self._whisper_dir(), wav, "ru")
+            else:
+                cfg = self._active_ai()
+                try:
+                    text = voice.transcribe_api(cfg["base_url"], self._store.ai_api_key(cfg["id"]), wav, s.stt_model, "ru", route)
+                except voice.VoiceError as exc:
+                    hint = "" if local_ok else " Можно установить локальное распознавание: Настройки → Голос."
+                    raise voice.VoiceError(str(exc) + hint) from exc
+            log.info("Распознавание (%s): %d симв. за %.1f с", engine, len(text), time.monotonic() - t)
+            if not text:
+                raise ValueError("Речь не распознана — попробуйте сказать громче или ближе к микрофону")
+            return {"text": text, "engine": engine}
+        except voice.VoiceError as exc:
+            raise ValueError(str(exc)) from exc
+        finally:
+            self._stt_lock.release()
+            if wav is not None:
+                try:
+                    wav.unlink()
+                except OSError:
+                    pass
+
     # --- аккаунты Google и VK ---
     @safe
     def account_status(self):
@@ -486,6 +712,11 @@ class Api:
 
     def _shutdown(self) -> None:
         self._player.stop()
+        try:
+            from . import httpc
+            httpc.close_pool()
+        except Exception:
+            pass
         if self._media is not None:
             try:
                 self._media.close()

@@ -1,5 +1,5 @@
 "use strict";
-/* own-tube 0.2.2. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
+/* own-tube 0.2.3. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
 (function () {
   const NS = "http://www.w3.org/2000/svg";
   const $ = (id) => document.getElementById(id);
@@ -40,11 +40,11 @@
 
   /* ---------- помощницы и темы ---------- */
   const ASSISTANTS = [
-    { id: "rei", name: "Рэй", theme: "violet", persona: "Спокойная и точная, чуть загадочная. Отвечает коротко и по делу." },
-    { id: "yuki", name: "Юки", theme: "minimal", persona: "Мягкая и заботливая. Объясняет подробно, любит спокойные каналы." },
-    { id: "kate", name: "Кейт", theme: "neon", persona: "Бойкая, шутит и подначивает. Подбирает, что посмотреть вечером." },
-    { id: "lila", name: "Лила", theme: "sakura", persona: "Энергичная, обожает музыку и танцы. Всегда за новый плейлист." },
-    { id: "nina", name: "Нина", theme: "light", persona: "Любит новости и тренды. Всё проверяет и даёт источники." },
+    { id: "rei", name: "Рэй", theme: "violet", tone: [1.0, 0.85], persona: "Спокойная и точная, чуть загадочная. Отвечает коротко и по делу." },
+    { id: "yuki", name: "Юки", theme: "minimal", tone: [0.92, 1.1], persona: "Мягкая и заботливая. Объясняет подробно, любит спокойные каналы." },
+    { id: "kate", name: "Кейт", theme: "neon", tone: [1.12, 1.15], persona: "Бойкая, шутит и подначивает. Подбирает, что посмотреть вечером." },
+    { id: "lila", name: "Лила", theme: "sakura", tone: [1.15, 1.35], persona: "Энергичная, обожает музыку и танцы. Всегда за новый плейлист." },
+    { id: "nina", name: "Нина", theme: "light", tone: [1.05, 1.0], persona: "Любит новости и тренды. Всё проверяет и даёт источники." },
   ];
   const THEMES = [
     ["assistant", "Как у помощницы", ["#a855f7", "#ff2bd6", "#ff7eb6"]],
@@ -65,6 +65,8 @@
   let MEDIA = "";        // локальный медиасервер: картинки и видео идут через прокси программы
   let acct = { google: {}, vk: {} };
   let watchCleanup = null;
+  const prefetched = new Set();   // ролики, для которых поток уже разбирается заранее
+  let activePager = null;       // текущий список с «Показать ещё» (для действия помощницы [[more]])
   function img(url) { return url && MEDIA ? MEDIA + "/img?u=" + encodeURIComponent(url) : ""; }
   function ytThumb(id) { return "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg"; }
 
@@ -134,23 +136,51 @@
     }
     $("chatIn").focus();
   }
-  function actionButton(a) {
-    if (a.kind === "search") return h("button", { type: "button", class: "ghost", onclick: () => { $("q").value = a.query; setSource("yt", true); current = { view: "search", arg: a.query, title: "" }; markNav(); reload(); } }, ic("search"), " Найти: " + a.query);
+  const SAFE_ACTIONS = ["play", "search", "open", "more"];
+  function runAction(a) {
+    if (a.kind === "search") { $("q").value = a.query; setSource("yt", true); go("search", a.query, ""); return true; }
     if (a.kind === "play") {
       const known = lastItems.find((x) => x.id === a.id);
-      return h("button", { type: "button", class: "ghost", onclick: () => play(known || { source: "yt", id: a.id, title: "Видео " + a.id, channel: "", channel_id: "", duration: "", views: "", live: false, thumb: ytThumb(a.id) }) }, ic("play"), " Включить" + (known ? ": " + known.title.slice(0, 40) : ""));
+      play(known || { source: "yt", id: a.id, title: "Видео " + a.id, channel: "", channel_id: "", duration: "", views: "", live: false, thumb: ytThumb(a.id) });
+      return true;
     }
-    if (a.kind === "open") return h("button", { type: "button", class: "ghost", onclick: () => go(a.section) }, "Открыть: " + a.label);
+    if (a.kind === "open") { go(a.section); return true; }
+    if (a.kind === "more") {
+      if (activePager) { activePager.loadMore(); status("Подгружаю ещё…", "busy"); return true; }
+      status("Здесь нечего подгружать", "err");
+      return false;
+    }
+    return false;
+  }
+  function actionButton(a) {
+    if (a.kind === "search") return h("button", { type: "button", class: "ghost", onclick: () => runAction(a) }, ic("search"), " Найти: " + a.query);
+    if (a.kind === "play") {
+      const known = lastItems.find((x) => x.id === a.id);
+      return h("button", { type: "button", class: "ghost", onclick: () => runAction(a) }, ic("play"), " Включить" + (known ? ": " + known.title.slice(0, 40) : ""));
+    }
+    if (a.kind === "open") return h("button", { type: "button", class: "ghost", onclick: () => runAction(a) }, "Открыть: " + a.label);
+    if (a.kind === "more") return h("button", { type: "button", class: "ghost", onclick: () => runAction(a) }, "Показать ещё");
     const names = { like: "Поставить лайк", subscribe: "Подписаться", comment: "Написать комментарий" };
     return h("button", { type: "button", class: "ghost warn", onclick: () => {
       if (!confirm(`${assistant().name} предлагает действие с аккаунтом: «${names[a.kind]}» (${a.arg}). Подтвердить?`)) return;
       status("Действия с аккаунтом YouTube из чата в этой версии не выполняются — сделайте это вручную.", "err");
     } }, (names[a.kind] || a.kind) + "… (нужно подтверждение)");
   }
+  /* Безопасные действия (поиск, включить, открыть раздел, «ещё») идут сразу; действия с аккаунтом — только после подтверждения. */
+  function autoRun(actions, bar) {
+    if (S.ai_autorun === false) return;
+    const a = actions.find((x) => SAFE_ACTIONS.includes(x.kind) && (x.kind !== "play" || x.known));
+    if (!a) return;
+    const idx = actions.indexOf(a);
+    setTimeout(() => {
+      if (runAction(a) && bar && bar.children[idx]) { bar.children[idx].classList.add("done"); bar.children[idx].title = "Выполнено автоматически"; }
+    }, 350);
+  }
   async function sendChat(text) {
     bubble("user", text);
     const ai = bubble("ai", "", "typing");
     act("think", "…");
+    stopSpeak();
     const items = (current.view === "watch" && current.arg ? [current.arg] : []).concat(lastItems).slice(0, 12);
     const r = await call("assistant_send", text, { view: current.view, title: current.title || "", items });
     if (!r.ok) { ai.classList.remove("typing"); ai.classList.add("err"); ai.textContent = r.error; act("wow", "!"); return; }
@@ -167,8 +197,11 @@
       ai.classList.remove("typing");
       if (x.error) { ai.classList.add("err"); ai.textContent = (x.text ? x.text + "\n\n" : "") + "Ошибка: " + x.error; act("wow", "!"); return; }
       if (!x.text) ai.textContent = "(пустой ответ модели)";
-      if (x.actions && x.actions.length) ai.after(h("div", { class: "m-acts" }, ...x.actions.map(actionButton)));
+      let bar = null;
+      if (x.actions && x.actions.length) { bar = h("div", { class: "m-acts" }, ...x.actions.map(actionButton)); ai.after(bar); }
       act("joy", "♪");
+      if (x.text) speak(x.text);
+      if (x.actions && x.actions.length) autoRun(x.actions, bar);
       $("msgs").scrollTop = $("msgs").scrollHeight;
     };
     tick();
@@ -183,6 +216,19 @@
       await call("assistant_clear"); chatLoaded = ""; openChat();
     });
     $("chatStop").addEventListener("click", async () => { if (chatJob) await call("assistant_cancel", chatJob); });
+    $("chatMic").addEventListener("click", toggleMic);
+    const ttsBtn = $("chatTts");
+    ttsBtn.setAttribute("aria-pressed", String(!!S.voice_tts));
+    ttsBtn.addEventListener("click", async () => {
+      const on = !S.voice_tts;
+      if (on && !("speechSynthesis" in window)) { status("Озвучка недоступна: окно не поддерживает синтез речи.", "err"); return; }
+      if (await saveSettings({ voice_tts: on })) {
+        ttsBtn.setAttribute("aria-pressed", String(on));
+        if (on) speak("Теперь я буду говорить вслух.", true); else stopSpeak();
+      }
+    });
+    loadVoices();
+    if ("speechSynthesis" in window) speechSynthesis.addEventListener("voiceschanged", loadVoices);
     $("chatForm").addEventListener("submit", (e) => {
       e.preventDefault();
       const text = $("chatIn").value.trim();
@@ -190,6 +236,96 @@
       $("chatIn").value = "";
       sendChat(text);
     });
+  }
+
+  /* ---------- голос: озвучка ответов и микрофон ---------- */
+  const tts = { voices: [], warned: false };
+  function loadVoices() { if ("speechSynthesis" in window) tts.voices = speechSynthesis.getVoices() || []; }
+  function pickVoice() {
+    return tts.voices.find((v) => S.voice_name && (v.voiceURI === S.voice_name || v.name === S.voice_name))
+      || tts.voices.find((v) => /^ru/i.test(v.lang)) || null;
+  }
+  function voiceNote(text) { if (!tts.warned) { tts.warned = true; status(text, "err"); } }
+  function speakable(text) {
+    return String(text || "").replace(/\[\[[^\]]*\]\]/g, "").replace(/https?:\/\/\S+/g, "ссылка")
+      .replace(/[*_`#>~]+/g, "").replace(/\p{Extended_Pictographic}/gu, "").replace(/\s+/g, " ").trim();
+  }
+  function stopSpeak() {
+    if ("speechSynthesis" in window) speechSynthesis.cancel();
+    $("stage").classList.remove("talking");
+  }
+  function speak(text, force) {
+    if (!(S.voice_tts || force)) return;
+    if (!("speechSynthesis" in window)) { voiceNote("Озвучка недоступна: окно не поддерживает синтез речи."); return; }
+    loadVoices();
+    const v = pickVoice();
+    if (!v) { voiceNote("Русского голоса в Windows нет. Добавьте его: Параметры → Время и язык → Речь → Добавить голоса → русский."); return; }
+    const t = speakable(text);
+    if (!t) return;
+    speechSynthesis.cancel();
+    // Chromium обрывает длинные тексты — читаем по предложениям
+    const parts = (t.match(/[^.!?…]+[.!?…]*/g) || [t]).map((x) => x.trim()).filter(Boolean);
+    const [rate, pitch] = assistant().tone || [1, 1];
+    parts.forEach((p, k) => {
+      const u = new SpeechSynthesisUtterance(p);
+      u.voice = v; u.lang = v.lang;
+      u.rate = Math.max(0.5, Math.min(2, (S.voice_rate || 1) * rate));
+      u.pitch = Math.max(0, Math.min(2, (S.voice_pitch == null ? 1 : S.voice_pitch) * pitch));
+      if (k === 0) u.onstart = () => $("stage").classList.add("talking");
+      if (k === parts.length - 1) u.onend = u.onerror = () => $("stage").classList.remove("talking");
+      speechSynthesis.speak(u);
+    });
+  }
+  const mic = { rec: null, timer: null };
+  function micError(e) {
+    const n = (e && e.name) || "";
+    if (n === "NotAllowedError" || n === "SecurityError") return "Доступ к микрофону запрещён. В Windows: Параметры → Конфиденциальность → Микрофон — разрешите классическим приложениям, затем перезапустите own-tube.";
+    if (n === "NotFoundError" || n === "OverconstrainedError") return "Микрофон не найден. Подключите его и попробуйте снова.";
+    if (n === "NotReadableError") return "Микрофон занят другой программой.";
+    return "Не удалось включить микрофон" + (n ? " (" + n + ")" : "") + ".";
+  }
+  function blobB64(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result).split(",")[1] || "");
+      fr.onerror = () => reject(fr.error);
+      fr.readAsDataURL(blob);
+    });
+  }
+  async function toggleMic() {
+    const btn = $("chatMic");
+    if (mic.rec) { mic.rec.stop(); return; }
+    if (chatJob) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) { status("Запись с микрофона недоступна в этом окне.", "err"); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+    catch (e) { const t = micError(e); status(t, "err"); bubble("ai", t, "err"); return; }
+    stopSpeak();
+    const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "";
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      clearTimeout(mic.timer); mic.rec = null;
+      stream.getTracks().forEach((t) => t.stop());
+      btn.classList.remove("rec"); btn.setAttribute("aria-label", "Говорить (микрофон)");
+      const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+      if (blob.size < 2500) { status("Запись получилась слишком короткой — скажите ещё раз.", "err"); return; }
+      const pending = bubble("me", "…распознаю речь…", "typing");
+      let r;
+      try { r = await call("stt_transcribe", await blobB64(blob), rec.mimeType || ""); }
+      catch (e) { r = { ok: false, error: "Не удалось прочитать запись" }; }
+      pending.remove();
+      if (!r.ok) { status(r.error, "err"); bubble("ai", "Не получилось распознать: " + r.error, "err"); act("wow", "!"); return; }
+      $("chatIn").value = r.text;
+      if (S.stt_autosend !== false) { $("chatIn").value = ""; sendChat(r.text); } else $("chatIn").focus();
+    };
+    rec.start();
+    mic.rec = rec;
+    btn.classList.add("rec"); btn.setAttribute("aria-label", "Закончить запись");
+    status("Говорите… (нажмите на микрофон, чтобы закончить)", "busy");
+    act("think", "…");
+    mic.timer = setTimeout(() => { if (mic.rec) mic.rec.stop(); }, 60000);
   }
 
   /* ---------- меню слева ---------- */
@@ -264,6 +400,9 @@
       thumb, h("div", { class: "meta" }, h("div", { class: "title" }, item.title), sub),
       h("button", { class: "more", type: "button", "aria-label": "Действия", onclick: (e) => { e.stopPropagation(); openMenu(e.currentTarget, item, opts); } }, ic("dots")));
     c.addEventListener("click", () => play(item, c));
+    let pf = null;   // наведение на карточку на 0,35 с — заранее разбираем поток, клик открывается почти мгновенно
+    c.addEventListener("pointerenter", () => { if (!prefetched.has(item.id) && !item.live && S.player_mode !== "mpv") pf = setTimeout(() => { prefetched.add(item.id); call("prefetch", item, !!item.short); }, 350); });
+    c.addEventListener("pointerleave", () => { clearTimeout(pf); });
     c.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === c) play(item, c); });
     return c;
   }
@@ -314,6 +453,7 @@
   }
   function play(item, node) {
     if (S.player_mode === "mpv" || item.live) return playExternal(item, node);  // прямые эфиры — в mpv
+    if (item.short) return go("shorts", item, "Shorts");
     go("watch", item, item.title);
   }
   async function playExternal(item, node) {
@@ -426,6 +566,159 @@
     open(qSel.value);
     call("related", item).then((r) => { if (my === seq && alive) related.replaceChildren(r.ok ? grid(r.items, { empty: "Похожих не нашлось." }) : h("p", { class: "note" }, r.error)); });
   }
+  /* ---------- Shorts: вертикальный плеер с листанием ---------- */
+  async function showShorts(startItem) {
+    const my = ++seq;
+    let alive = true, idx = 0, items = [], cursor = null, loadingMore = false, muted = false, wantNext = false, lastStep = 0, skipTimer = null;
+    const seen = new Set();
+    const slots = new Map();
+    const stage = h("div", { class: "sh-stage" });
+    const chEl = h("b", { class: "sh-ch" });
+    const ttEl = h("div", { class: "sh-ttl" });
+    const msgEl = h("div", { class: "sh-msg" }, "Загружаю Shorts…");
+    const countEl = h("span", { class: "sh-count" });
+    const mk = (label, text, fn, extra) => h("button", { type: "button", class: "sh-btn" + (extra ? " " + extra : ""), "aria-label": label, title: label, onclick: fn }, text);
+    const prevB = mk("Предыдущий (↑)", "▲", () => step(-1));
+    const nextB = mk("Следующий (↓)", "▼", () => step(1));
+    const muteB = mk("Звук (M)", "🔊", () => toggleMute());
+    const pauseB = mk("Пауза (пробел)", "❚❚", () => togglePause());
+    const extB = mk("Открыть в отдельном окне (mpv)", "mpv", () => { const s0 = items[idx]; if (s0) playExternal(s0); });
+    const side = h("div", { class: "sh-side" }, prevB, nextB, pauseB, muteB, extB, countEl);
+    const frame = h("div", { class: "sh-frame" }, stage, h("div", { class: "sh-info" }, chEl, ttEl), msgEl);
+    const hint = h("p", { class: "note sh-hint" }, "Колесо мыши, ↑ ↓, свайп — следующий и предыдущий; пробел — пауза; M — звук.");
+    view(h("div", { class: "shorts-view" }, h("div", { class: "sh-row" }, frame, side), hint));
+    status("");
+
+    const cur = () => slots.get(idx);
+    const setMsg = (t) => { msgEl.textContent = t || ""; msgEl.hidden = !t; };
+    function addItems(list) {
+      let n = 0;
+      for (const i of list || []) { if (!i || seen.has(i.id)) continue; seen.add(i.id); items.push(i); n++; }
+      lastItems = items;
+      return n;
+    }
+    function slotFor(i) {
+      if (slots.has(i)) return slots.get(i);
+      const item = items[i];
+      if (!item) return null;
+      const vid = h("video", { class: "sh-vid", playsinline: true, loop: true, preload: "auto" });
+      vid.muted = muted;
+      const sl = { i, item, vid, sid: null, err: "", ready: false, info: null };
+      slots.set(i, sl);
+      call("watch", item, null, true).then((r) => {
+        if (!alive || slots.get(i) !== sl) { if (r.ok) call("drop_watch", r.sid); return; }
+        if (!r.ok) { sl.err = r.error; if (i === idx) { paint(); scheduleSkip(); } return; }
+        sl.sid = r.sid; sl.info = r; sl.ready = true;
+        vid.src = r.url;
+        if (i === idx) { paint(); playCurrent(); }
+      });
+      vid.addEventListener("playing", () => { if (slots.get(i) === sl && i === idx) setMsg(""); });
+      vid.addEventListener("waiting", () => { if (slots.get(i) === sl && i === idx) setMsg("Буферизация…"); });
+      vid.addEventListener("error", () => { if (slots.get(i) === sl && sl.ready) { sl.err = "Не удалось показать этот ролик"; if (i === idx) { paint(); scheduleSkip(); } } });
+      return sl;
+    }
+    function paint() {
+      const sl = cur();
+      if (!sl) return;
+      if (stage.firstChild !== sl.vid) stage.replaceChildren(sl.vid);
+      const d = sl.info || {};
+      chEl.textContent = d.channel || sl.item.channel || "";
+      ttEl.textContent = d.title || sl.item.title || "";
+      countEl.textContent = (idx + 1) + (cursor ? "" : " / " + items.length);
+      prevB.disabled = idx === 0;
+      setMsg(sl.err ? sl.err + " — перехожу к следующему…" : (!sl.ready ? "Загружаю…" : (sl.vid.paused ? "" : "")));
+    }
+    function playCurrent() {
+      const sl = cur();
+      if (!sl || !sl.ready || sl.err) return;
+      sl.vid.muted = muted;
+      sl.vid.play().then(() => { pauseB.textContent = "❚❚"; }).catch(() => setMsg("Нажмите на видео, чтобы запустить"));
+    }
+    function scheduleSkip() {
+      clearTimeout(skipTimer);
+      skipTimer = setTimeout(() => { if (alive && cur() && cur().err && idx + 1 < items.length) step(1, true); }, 1400);
+    }
+    function togglePause() {
+      const sl = cur();
+      if (!sl || !sl.ready) return;
+      if (sl.vid.paused) { sl.vid.play().catch(() => {}); pauseB.textContent = "❚❚"; setMsg(""); } else { sl.vid.pause(); pauseB.textContent = "▶"; setMsg("Пауза"); }
+    }
+    function toggleMute() { muted = !muted; muteB.textContent = muted ? "🔇" : "🔊"; const sl = cur(); if (sl) sl.vid.muted = muted; }
+    function drop(k) {
+      const sl = slots.get(k);
+      if (!sl) return;
+      slots.delete(k);
+      sl.vid.pause(); sl.vid.removeAttribute("src"); sl.vid.load();
+      if (sl.sid) call("drop_watch", sl.sid);
+    }
+    async function ensureMore() {
+      if (loadingMore || !cursor) return;
+      loadingMore = true;
+      let r = await call("feed", "shorts", null, cursor, "fresh");
+      if (!r.ok) r = await call("feed", "shorts", null, null, "fresh");   // токен устарел — берём свежую подборку
+      loadingMore = false;
+      if (!alive) return;
+      if (r.ok) { addItems(r.items); cursor = r.more || null; }
+      else setMsg(r.error);
+      countEl.textContent = (idx + 1) + (cursor ? "" : " / " + items.length);
+      if (wantNext && idx + 1 < items.length) { wantNext = false; step(1, true); }
+    }
+    function step(dir, force) {
+      const now = Date.now();
+      if (!force && now - lastStep < 450) return;
+      const j = idx + dir;
+      if (j < 0) return;
+      if (j >= items.length) { wantNext = true; setMsg("Подбираю ещё…"); ensureMore(); return; }
+      lastStep = now; clearTimeout(skipTimer);
+      const old = cur(); if (old) old.vid.pause();
+      idx = j;
+      stage.classList.remove("to-next", "to-prev"); void stage.offsetWidth; stage.classList.add(dir > 0 ? "to-next" : "to-prev");
+      slotFor(idx); paint(); playCurrent();
+      slotFor(idx + 1);                                          // следующий ролик грузится заранее
+      if (items[idx + 2] && !prefetched.has(items[idx + 2].id)) { prefetched.add(items[idx + 2].id); call("prefetch", items[idx + 2], true); }
+      for (const k of [...slots.keys()]) if (k < idx - 1 || k > idx + 1) drop(k);
+      if (items.length - idx < 6) ensureMore();
+    }
+    // колесо, клавиши, свайп
+    let wheelAt = 0;
+    frame.addEventListener("wheel", (e) => { e.preventDefault(); const t = Date.now(); if (t - wheelAt < 600 || Math.abs(e.deltaY) < 4) return; wheelAt = t; step(e.deltaY > 0 ? 1 : -1); }, { passive: false });
+    let down = null;
+    stage.addEventListener("pointerdown", (e) => { down = { y: e.clientY, x: e.clientX, t: Date.now() }; try { stage.setPointerCapture(e.pointerId); } catch (_) { /* не критично */ } });
+    stage.addEventListener("pointerup", (e) => {
+      if (!down) return;
+      const dy = down.y - e.clientY, dx = down.x - e.clientX; down = null;
+      if (Math.abs(dy) > 50 && Math.abs(dy) > Math.abs(dx)) step(dy > 0 ? 1 : -1);
+      else if (Math.abs(dy) < 8 && Math.abs(dx) < 8) togglePause();
+    });
+    stage.addEventListener("pointercancel", () => { down = null; });
+    const keys = (e) => {
+      if (["INPUT", "SELECT", "TEXTAREA"].includes((e.target.tagName || ""))) return;
+      if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === "j") { e.preventDefault(); step(1); }
+      else if (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "k") { e.preventDefault(); step(-1); }
+      else if (e.key === " ") { e.preventDefault(); togglePause(); }
+      else if (e.key === "m") toggleMute();
+    };
+    document.addEventListener("keydown", keys);
+    watchCleanup = () => {
+      alive = false; clearTimeout(skipTimer);
+      document.removeEventListener("keydown", keys);
+      for (const k of [...slots.keys()]) drop(k);
+      call("stop_watch");
+    };
+
+    // список: стартовый ролик (если открыли конкретный) и свежая подборка
+    if (startItem && startItem.id) addItems([startItem]);
+    if (items.length) { slotFor(0); paint(); }
+    const r = await call("feed", "shorts", null, null, "fresh");
+    if (!alive || my !== seq) return;
+    if (!r.ok) { if (!items.length) setMsg(r.error); return; }
+    addItems(r.items); cursor = r.more || null;
+    if (!items.length) { setMsg("Shorts не нашлись. Попробуйте позже."); return; }
+    if (!cur()) { slotFor(0); paint(); }
+    slotFor(1);
+    if (items[2] && !prefetched.has(items[2].id)) { prefetched.add(items[2].id); call("prefetch", items[2], true); }
+    countEl.textContent = "1" + (cursor ? "" : " / " + items.length);
+  }
   async function choosePlaylist(item) {
     const dlg = $("plDialog");
     const r = await call("library", "playlists");
@@ -452,6 +745,85 @@
     if (!items.length) return h("p", { class: "empty" }, (opts && opts.empty) || "Здесь пока пусто.");
     return h("div", { class: "grid" + (opts && opts.shorts ? " shorts" : "") }, ...items.map((i) => card(i, opts)));
   }
+  function skeletonCards(n) {
+    return Array.from({ length: n }, () => h("div", { class: "card sk", "aria-hidden": "true" },
+      h("div", { class: "thumb" }), h("div", { class: "meta" }, h("div", { class: "title" }), h("div", { class: "sub" }))));
+  }
+  /* Список с догрузкой: сначала сохранённое (мгновенно), потом свежее; дальше — по прокрутке и кнопке «Показать ещё».
+     fetchPage(cursor, mode) -> ответ API {ok, items, more}; mode: "cache" (только сохранённое) или "fresh". */
+  function pagedGrid(fetchPage, opts) {
+    opts = opts || {};
+    const my = seq;
+    const gridEl = h("div", { class: "grid" + (opts.shorts ? " shorts" : "") }, ...skeletonCards(opts.skeletons || 12));
+    const moreBtn = h("button", { type: "button", class: "ghost more-btn", hidden: true }, "Показать ещё");
+    const note = h("p", { class: "note pg-note", hidden: true });
+    const sentinel = h("div", { class: "sentinel", "aria-hidden": "true" });
+    const wrap = h("div", { class: "paged" }, gridEl, h("div", { class: "pager" }, moreBtn, note), sentinel);
+    let seen = new Set(), total = [], cursor = null, busy = false, io = null;
+    const alive = () => my === seq;
+    const setNote = (t, err) => { note.hidden = !t; note.textContent = t || ""; note.classList.toggle("err", !!err); };
+    const add = (items) => {
+      let n = 0;
+      for (const i of items || []) {
+        const k = (i.source || "yt") + ":" + i.id;
+        if (seen.has(k)) continue;
+        seen.add(k); total.push(i); gridEl.append(card(i, opts)); n++;
+      }
+      lastItems = total;
+      return n;
+    };
+    const sync = () => { moreBtn.hidden = !cursor; };
+    const nearEnd = () => cursor && !busy && sentinel.getBoundingClientRect().top < window.innerHeight + 900;
+    async function loadMore() {
+      if (busy || !cursor || !alive()) return;
+      busy = true; moreBtn.disabled = true; moreBtn.textContent = "Загружаю…";
+      let got = 0;
+      for (let tries = 0; cursor && got === 0 && tries < 3; tries++) {
+        const r = await fetchPage(cursor, "fresh");
+        if (!alive()) return;
+        if (!r.ok) { setNote(r.error + " — нажмите «Показать ещё», чтобы повторить.", true); break; }
+        got += add(r.items); cursor = r.more || null; setNote("");
+      }
+      busy = false; moreBtn.disabled = false; moreBtn.textContent = "Показать ещё"; sync(); status("");
+      if (got && nearEnd()) setTimeout(loadMore, 60);
+    }
+    moreBtn.addEventListener("click", loadMore);
+    async function begin() {
+      let shown = false;
+      if (opts.cache !== false) {
+        const c = await fetchPage(null, "cache");
+        if (!alive()) return;
+        if (c.ok && c.items && c.items.length) {
+          gridEl.replaceChildren(); add(c.items); cursor = null; shown = true;
+          if (opts.onMeta) opts.onMeta(c);
+          setNote("Показано сохранённое, обновляю…");
+        }
+      }
+      const r = await fetchPage(null, "fresh");
+      if (!alive()) return;
+      if (!r.ok) {
+        if (!shown) gridEl.replaceChildren(h("p", { class: "empty" }, r.error));
+        setNote(shown ? "Не удалось обновить: " + r.error : "", shown);
+        status(shown ? "" : r.error, shown ? "" : "err");
+        return;
+      }
+      const same = shown && r.items.length && r.items.slice(0, 6).every((x, i) => total[i] && total[i].id === x.id);
+      if (!same) { gridEl.replaceChildren(); seen = new Set(); total = []; }
+      add(r.items); cursor = r.more || null; setNote(""); status("");
+      if (opts.onMeta) opts.onMeta(r);
+      if (!total.length) gridEl.replaceChildren(h("p", { class: "empty" }, opts.empty || "Ничего не найдено."));
+      sync();
+      if ("IntersectionObserver" in window) {
+        io = new IntersectionObserver((es) => { if (!alive()) { io.disconnect(); return; } if (es.some((e) => e.isIntersecting)) loadMore(); }, { rootMargin: "900px 0px" });
+        io.observe(sentinel);
+      }
+      if (nearEnd()) setTimeout(loadMore, 60);
+    }
+    activePager = { loadMore: () => loadMore(), alive };
+    status("Загружаю…", "busy");
+    begin();
+    return wrap;
+  }
   let seq = 0;
   async function load(fn, render) {
     const my = ++seq;
@@ -475,12 +847,18 @@
   }
   function reload() {
     const v = current.view;
-    if (v === "home") return load(() => call("feed", "home"), (r) => view(title("Главная", h("small", {}, r.from === "subs" ? "новое с ваших подписок" : "популярное за неделю — подпишитесь на каналы, и здесь будут они")), grid(r.items)));
-    if (v === "shorts") return load(() => call("feed", "shorts"), (r) => view(title("Shorts", h("small", {}, "короткие видео")), grid(r.items, { shorts: true })));
+    ++seq; activePager = null;
+    if (v === "home") {
+      const sub = h("small", {});
+      return view(title("Главная", sub), pagedGrid((c, m) => call("feed", "home", null, c, m), {
+        onMeta: (r) => { sub.textContent = r.from === "subs" ? "новое с ваших подписок" : "популярное за неделю — подпишитесь на каналы, и здесь будут они"; } }));
+    }
+    if (v === "shorts") return showShorts(current.arg);
     if (v === "subs") return showSubs();
-    if (v.startsWith("cat:")) { const k = v.slice(4); return load(() => call("feed", "category", k), (r) => view(title(CAT[k]), grid(r.items))); }
-    if (v === "channel") return load(() => call("feed", "channel", current.arg), (r) => view(title(current.title || "Канал",
-      h("span", { class: "sp" }), h("button", { class: "ghost", type: "button", onclick: () => subscribe(current.arg, current.title, true) }, "Подписаться")), grid(r.items)));
+    if (v.startsWith("cat:")) { const k = v.slice(4); return view(title(CAT[k]), pagedGrid((c, m) => call("feed", "category", k, c, m))); }
+    if (v === "channel") { const cid = current.arg; return view(title(current.title || "Канал",
+      h("span", { class: "sp" }), h("button", { class: "ghost", type: "button", onclick: () => subscribe(cid, current.title, true) }, "Подписаться")),
+      pagedGrid((c, m) => call("feed", "channel", cid, c, m))); }
     if (v === "history") return load(() => call("library", "history"), (r) => view(title("История", h("span", { class: "sp" }), acctBtn("history", "История"),
       h("button", { class: "ghost", type: "button", onclick: async () => { if (confirm("Очистить всю историю просмотра?")) { await call("clear_history"); reload(); refreshCounts(); } } }, "Очистить")),
       grid(r.items, { empty: "Вы ещё ничего не смотрели. Историю из YouTube можно перенести через Google Takeout в настройках." })));
@@ -517,7 +895,9 @@
   }
 
   async function showSubs() {
+    const my0 = seq;
     const r = await call("library", "subscriptions");
+    if (my0 !== seq) return;
     const chans = r.ok ? r.channels : [];
     const chips = h("div", { class: "chips" }, ...chans.map((c) => h("span", { class: "chip" },
       h("button", { class: "chan", type: "button", onclick: () => go("channel", c.channel_id, c.title) }, c.title),
@@ -529,7 +909,8 @@
       return;
     }
     view(title("Подписки", h("small", {}, `каналов: ${chans.length}`), h("span", { class: "sp" }), acctBtn("subs", "Подписки")), chips, h("div", { id: "subsFeed" }));
-    load(() => call("feed", "subs"), (x) => { const f = $("subsFeed"); if (f) f.replaceChildren(grid(x.items)); });
+    const f = $("subsFeed");
+    if (f) f.replaceChildren(pagedGrid((c, m) => call("feed", "subs", null, c, m), { empty: "Новых видео от подписок пока нет." }));
   }
 
   async function showPlaylists() {
@@ -585,8 +966,9 @@
     status("");
   }
 
-  async function doSearch(q) {
-    await load(() => call("search", q, source), (r) => view(title((source === "vk" ? "VK: " : "Поиск: ") + q), grid(r.items)));
+  function doSearch(q) {
+    const src = source;
+    view(title((src === "vk" ? "VK: " : "Поиск: ") + q), pagedGrid((c, m) => call("search", q, src, c, m), { empty: "Ничего не нашлось. Попробуйте другой запрос." }));
   }
 
   function setSource(s, silent) {
@@ -877,7 +1259,7 @@
     const dlDir = h("input", { type: "text", value: S.download_dir, readonly: true, "aria-label": "Папка загрузок" });
     const tkMsg = h("p", { class: "note" });
 
-    const cats = [["look", "Оформление"], ["play", "Воспроизведение"], ["net", "Сеть"], ["data", "Данные"], ["accounts", "Аккаунты"], ["ai", "ИИ"]];
+    const cats = [["look", "Оформление"], ["play", "Воспроизведение"], ["net", "Сеть"], ["data", "Данные"], ["accounts", "Аккаунты"], ["ai", "ИИ"], ["voice", "Голос"]];
     view(title("Настройки", h("small", {}, "own-tube " + st.version)),
       h("div", { class: "subnav" }, ...cats.map(([id, t]) => h("button", { type: "button", onclick: () => $("set-" + id).scrollIntoView({ block: "start" }) }, t))),
       panel("look", "palette", "Оформление и помощницы", "Тема меняет цвета всего окна. «Как у помощницы» — у каждой своя.", themeOpts, h("div", { class: "row2" }), ...asstRows),
@@ -914,9 +1296,99 @@
         } }, "Выбрать…"))),
       buildAccountsPanel(),
       buildAiSection(),
+      buildVoicePanel(),
     );
     status("");
     if (section) { const el = $("set-" + section); if (el) el.scrollIntoView({ block: "start" }); }
+  }
+
+  function buildVoicePanel() {
+    const msg = h("p", { class: "note" });
+    const rate = h("input", { type: "range", min: "0.6", max: "1.6", step: "0.05", value: String(S.voice_rate || 1), "aria-label": "Скорость речи" });
+    const pitch = h("input", { type: "range", min: "0.5", max: "1.5", step: "0.05", value: String(S.voice_pitch == null ? 1 : S.voice_pitch), "aria-label": "Высота голоса" });
+    rate.addEventListener("change", () => saveSettings({ voice_rate: Number(rate.value) }));
+    pitch.addEventListener("change", () => saveSettings({ voice_pitch: Number(pitch.value) }));
+    const voiceSel = h("select", { "aria-label": "Голос" });
+    function fillVoices() {
+      loadVoices();
+      const ru = tts.voices.filter((v) => /^ru/i.test(v.lang)), rest = tts.voices.filter((v) => !/^ru/i.test(v.lang));
+      voiceSel.replaceChildren(h("option", { value: "" }, ru.length ? "Подобрать русский автоматически" : "Русских голосов нет"),
+        ...ru.concat(rest).map((v) => h("option", { value: v.voiceURI }, v.name + " (" + v.lang + ")")));
+      voiceSel.value = S.voice_name || "";
+      msg.textContent = !("speechSynthesis" in window) ? "В этом окне нет синтеза речи."
+        : (ru.length ? "" : "В Windows не установлен русский голос: Параметры → Время и язык → Речь → Добавить голоса → русский. После установки перезапустите own-tube.");
+    }
+    fillVoices();
+    if ("speechSynthesis" in window) speechSynthesis.addEventListener("voiceschanged", fillVoices);
+    voiceSel.addEventListener("change", () => saveSettings({ voice_name: voiceSel.value }));
+
+    const engine = h("select", { "aria-label": "Способ распознавания" },
+      h("option", { value: "auto" }, "Авто: локальный whisper, если установлен, иначе API"),
+      h("option", { value: "api" }, "Только API активной конфигурации ИИ"),
+      h("option", { value: "local" }, "Только локальный whisper.cpp"));
+    engine.value = S.stt_engine || "auto";
+    engine.addEventListener("change", () => saveSettings({ stt_engine: engine.value }));
+    const model = h("input", { type: "text", value: S.stt_model || "whisper-1", maxlength: "80", "aria-label": "Модель распознавания (API)", spellcheck: "false" });
+    const wdir = h("input", { type: "text", value: S.whisper_dir || "", placeholder: "по умолчанию — папка данных программы (можно E:\\AI\\whisper)", "aria-label": "Папка whisper", spellcheck: "false" });
+    const sttState = h("p", { class: "note" }, "Проверяю…");
+    const bar = h("div", { class: "progress", hidden: true }, h("i"));
+    const installBtn = h("button", { class: "go", type: "button" }, "Установить локальное распознавание");
+    let timer = null;
+    async function refresh() {
+      const r = await call("stt_status");
+      if (!r.ok) { sttState.textContent = r.error; return; }
+      const ins = r.install || {};
+      if (ins.running) {
+        bar.hidden = false;
+        const pct = ins.total ? Math.round(ins.done / ins.total * 100) : 0;
+        bar.firstChild.style.width = pct + "%";
+        sttState.textContent = `Скачиваю (${ins.stage}): ${pct}% — ${Math.round(ins.done / 1048576)} из ${Math.round(ins.total / 1048576)} МБ`;
+        installBtn.disabled = true;
+        if (!timer) timer = setInterval(refresh, 700);
+        return;
+      }
+      if (timer) { clearInterval(timer); timer = null; }
+      bar.hidden = true; installBtn.disabled = false;
+      if (ins.error) sttState.textContent = "Установка не удалась: " + ins.error;
+      else sttState.textContent = (r.local ? "Локальное распознавание установлено: " + r.dir
+        : "Локально не установлено (около " + r.size_mb + " МБ, whisper.cpp + модель base, хватает для русского)")
+        + (r.api_possible ? ". API: активная конфигурация OpenAI-совместимая — запрос /audio/transcriptions будет проверен при первой записи." : ". API: активная конфигурация не подходит для речи.")
+        + (r.ffmpeg ? "" : " ffmpeg не найден — запись обработать нечем.");
+      installBtn.textContent = r.local ? "Переустановить" : "Установить локальное распознавание";
+    }
+    installBtn.addEventListener("click", async () => {
+      if (wdir.value !== (S.whisper_dir || "")) { if (!(await saveSettings({ whisper_dir: wdir.value }))) return; }
+      const r = await call("stt_install");
+      if (!r.ok) { sttState.textContent = r.error; return; }
+      refresh();
+    });
+    wdir.addEventListener("change", async () => { if (await saveSettings({ whisper_dir: wdir.value })) refresh(); });
+    model.addEventListener("change", () => saveSettings({ stt_model: model.value }));
+    const micTest = h("button", { class: "ghost", type: "button", onclick: async () => {
+      if (!navigator.mediaDevices) { micMsg.textContent = "Микрофон недоступен в этом окне."; return; }
+      try {
+        const st = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const label = (st.getAudioTracks()[0] || {}).label || "микрофон";
+        st.getTracks().forEach((t) => t.stop());
+        micMsg.textContent = "Микрофон доступен: " + label;
+      } catch (e) { micMsg.textContent = micError(e); }
+    } }, "Проверить микрофон");
+    const micMsg = h("p", { class: "note" });
+    refresh();
+    return panel("voice", "speaker", "Голос и помощница", "Озвучка ответов — голосом Windows (у каждой помощницы свой тон), ввод голосом — с микрофона.",
+      field("Помощница сама открывает", sw(S.ai_autorun !== false, (v) => saveSettings({ ai_autorun: v }), "Автовыполнение действий помощницы"),
+        h("span", { class: "note" }, "поиск, «включить», раздел и «ещё» выполняются без подтверждения; лайки, подписки и комментарии — только с подтверждением")),
+      field("Озвучивать ответы", sw(!!S.voice_tts, (v) => { const ok = saveSettings({ voice_tts: v }); $("chatTts").setAttribute("aria-pressed", String(v)); return ok; }, "Озвучивать ответы")),
+      field("Голос", voiceSel),
+      field("Скорость", rate), field("Высота", pitch),
+      h("div", { class: "row2" }, h("button", { class: "ghost", type: "button", onclick: () => speak(assistant().name + ": привет! Так звучит мой голос.", true) }, "Проверить голос")),
+      msg,
+      h("h3", { class: "sub-h" }, "Ввод голосом (микрофон в чате)"),
+      field("Распознавание", engine),
+      field("Модель для API", model, h("span", { class: "note" }, "для OpenAI-совместимых серверов (/audio/transcriptions)")),
+      field("Папка whisper", wdir),
+      field("Отправлять сразу", sw(S.stt_autosend !== false, (v) => saveSettings({ stt_autosend: v }), "Отправлять сразу после распознавания")),
+      h("div", { class: "row2" }, installBtn, micTest), bar, sttState, micMsg);
   }
 
   function buildAccountsPanel() {

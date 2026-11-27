@@ -43,7 +43,7 @@ LOGIN_URL = {
 }
 SIGNED_IN = {
     "google": ("SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"),
-    "vk": ("remixsid", "remixnsid"),
+    "vk": ("remixsid", "remixsid6", "remixnsid"),
 }
 MAX_COOKIES_TEXT = 256 * 1024
 
@@ -107,6 +107,17 @@ def parse_netscape(text: str, kind: str) -> list[dict]:
         if c:
             out.append(c)
     return out
+
+
+def summarize(cookies: list[dict]) -> str:
+    """Для журнала: сколько cookies на каждом домене и какие из них признаки входа. Значения не показываем."""
+    by: dict[str, int] = {}
+    for c in cookies:
+        d = (c.get("domain") or "?").lstrip(".")
+        by[d] = by.get(d, 0) + 1
+    marks = sorted({c["name"] for c in cookies if c.get("name") in {n for v in SIGNED_IN.values() for n in v}})
+    return ("; ".join(f"{d}: {n}" for d, n in sorted(by.items())) or "cookies нет") + \
+           (" | признаки входа: " + ", ".join(marks) if marks else " | признаков входа нет")
 
 
 def signed_in(cookies: list[dict], kind: str) -> bool:
@@ -201,6 +212,7 @@ class Accounts:
                 with self._lock:
                     self._procs.pop(k, None)
                 self._secrets.reload(secret_name(k))  # окно входа писало из другого процесса
+                log.info("Окно входа (%s) закрыто. Сохранённые cookies: %s", k, summarize(self.cookies(k)))
             meta = self._meta(k)
             cookies = self.cookies(k)
             info = meta.get("info") if isinstance(meta.get("info"), dict) else {}

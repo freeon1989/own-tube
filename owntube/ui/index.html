@@ -96,12 +96,13 @@
     <img id="chatAv" class="av" src="assets/heroines/rei.webp" alt="">
     <div class="ch-who"><b id="chName">Рэй</b><span id="chSub">ИИ</span></div>
     <button class="icon-btn sm" id="chatStop" type="button" aria-label="Остановить ответ" title="Остановить ответ" hidden>■</button>
+    <button class="icon-btn sm" id="chatTts" type="button" aria-label="Озвучивать ответы" aria-pressed="false" title="Озвучивать ответы"><svg class="ico"><use href="#i-speaker"/></svg></button>
     <button class="icon-btn sm" id="chatClear" type="button" aria-label="Очистить переписку" title="Очистить переписку"><svg class="ico"><use href="#i-trash"/></svg></button>
     <button class="icon-btn sm" id="chatClose" type="button" aria-label="Свернуть чат"><svg class="ico"><use href="#i-close"/></svg></button>
   </header>
   <div class="msgs" id="msgs" aria-live="polite"></div>
   <form class="composer" id="chatForm">
-    <button class="icon-btn" type="button" disabled aria-label="Микрофон (позже)" title="Голос — в следующих версиях"><svg class="ico"><use href="#i-mic"/></svg></button>
+    <button class="icon-btn" id="chatMic" type="button" aria-label="Говорить (микрофон)" title="Нажмите и говорите; ещё раз — закончить"><svg class="ico"><use href="#i-mic"/></svg></button>
     <label class="sr" for="chatIn">Сообщение</label>
     <input id="chatIn" type="text" placeholder="Написать помощнице…" autocomplete="off" maxlength="4000">
     <button class="go sq" type="submit" aria-label="Отправить"><svg class="ico"><use href="#i-send"/></svg></button>

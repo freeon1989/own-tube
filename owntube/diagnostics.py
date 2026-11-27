@@ -7,7 +7,9 @@ import time
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import httpc, validate
+from urllib.parse import parse_qs
+
+from . import bridge, httpc, validate
 from .network import Route
 
 TEST_THUMB = "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"
@@ -24,7 +26,38 @@ def _step(name: str, fn: Callable[[], str]) -> dict:
     return {"name": name, "ok": ok, "detail": detail, "ms": int((time.monotonic() - t) * 1000)}
 
 
-def run(route: Route, search_fn=None) -> dict:
+def probe_stream(st: dict, route: Route) -> str:
+    """Читает первые 64 КБ настоящего потока (Range) теми же заголовками, что у плеера. Возвращает описание или бросает ValueError."""
+    url = st["video"]
+    host = urlsplit(url).hostname or "?"
+    ipq = (parse_qs(urlsplit(url).query).get("ip") or [""])[0]
+    fam = "IPv6" if ":" in ipq else ("IPv4" if ipq else "?")
+    hdr = {"Range": "bytes=0-65535", "Accept": "*/*"}
+    if st.get("user_agent"):
+        hdr["User-Agent"] = st["user_agent"]
+    if st.get("referer"):
+        hdr["Referer"] = st["referer"]
+    t = time.monotonic()
+    tries = 0
+    while True:
+        tries += 1
+        status, _, data = httpc.fetch("GET", url, route, hdr, limit=256 * 1024, timeout=25)
+        if status != 403 or tries >= 4:
+            break
+        time.sleep(1.0)  # плеер тоже повторяет 403: соседний выход прокси/шлюза может совпасть с IP выдачи
+    ms = int((time.monotonic() - t) * 1000)
+    how = bridge.LAST.get(host) or {}
+    atyp = {"domain": "имя хоста (ATYP 3)", "ipv4": "IPv4-адрес (ATYP 1)"}.get(how.get("atyp"), "напрямую")
+    if status not in (200, 206) or not data:
+        hint = (" Адрес потока привязан к IP, с которого его выдали: если выдача шла по IPv6, а прокси ходит к "
+                "googlevideo по IPv4 (или наоборот), сервер отвечает 403.") if status == 403 else ""
+        raise ValueError(f"{host}: HTTP {status}, {len(data)} байт; соединение: {atyp}; адрес выдан для {fam}.{hint}")
+    again = f", с попытки {tries}" if tries > 1 else ""
+    return (f"{host}: HTTP {status}, получено {len(data) // 1024} КБ за {ms} мс{again}; "
+            f"соединение с прокси: {atyp}; адрес потока выдан для {fam}")
+
+
+def run(route: Route, search_fn=None, video_fn=None, pipe_fn=None) -> dict:
     steps: list[dict] = []
     if not route.direct:
         p = urlsplit(route.proxy)
@@ -60,11 +93,44 @@ def run(route: Route, search_fn=None) -> dict:
 
         if search_fn is not None:
             def search():
-                items = search_fn("lofi", route, 3)
+                got = search_fn("lofi", route, 3)
+                items, engine = got if isinstance(got, tuple) else (got, "yt-dlp")
                 if not items:
                     raise ValueError("Поиск вернул пустой список")
-                return f"Поиск через yt-dlp работает: {len(items)} результата"
-            steps.append(_step("Поиск yt-dlp", search))
+                return f"Поиск работает ({engine}): {len(items)} результата"
+            steps.append(_step("Поиск", search))
+
+        if video_fn is not None:
+            holder: dict = {}
+
+            def resolve():
+                holder["streams"] = video_fn(route)
+                st = holder["streams"]
+                host = urlsplit(st["video"]).hostname or "?"
+                return f"Адрес потока получен ({host}, {st.get('height') or '?'}p, {st.get('container')})"
+            steps.append(_step("Проверка видео: адрес потока", resolve))
+
+            if steps[-1]["ok"]:
+                def fetch():
+                    try:
+                        return probe_stream(holder["streams"], route)
+                    except ValueError as first:
+                        # так же делает плеер: если основной формат отдал 403, берёт другой кодек (H.264/MP4)
+                        try:
+                            alt = probe_stream(video_fn(route, "h264"), route)
+                        except Exception:
+                            raise first
+                        return alt + " — основной формат (VP9) ответил 403, запасной H.264 открылся: плеер переключится сам"
+                steps.append(_step("Проверка видео: первые байты потока", fetch))
+
+                if pipe_fn is not None and steps[-1]["ok"]:
+                    def pipe():
+                        t = time.monotonic()
+                        n = pipe_fn(holder["streams"])
+                        if n <= 0:
+                            raise ValueError("Встроенный плеер не получил данных")
+                        return f"Встроенный плеер (ffmpeg) отдал {n // 1024} КБ за {int((time.monotonic() - t) * 1000)} мс"
+                    steps.append(_step("Проверка видео: встроенный плеер", pipe))
     ok = bool(steps) and all(s["ok"] for s in steps)
     first_bad = next((s for s in steps if not s["ok"]), None)
     detail = ("Всё в порядке: " + route.label) if ok else (f"Сбой на шаге «{first_bad['name']}»: {first_bad['detail']}"

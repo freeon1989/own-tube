@@ -42,6 +42,126 @@ def run(path: str) -> int:
         step(tool, lambda t=tool, a=arg: {"path": find_tool(t), "version": _version(find_tool(t), a)})
     route = Route()
     step("search", lambda: [i["title"][:40] for i in search.search("lofi hip hop", route, 3)])
+    def fast_lists():
+        from . import lists
+        t = time.time()
+        items, cur, _ = lists.first("search", "lofi hip hop", route)
+        first = round(time.time() - t, 2)
+        more, cur2 = lists.more(cur, route) if cur else ([], None)
+        if len(items) < 10 or not cur or not more or {i["id"] for i in items} & {i["id"] for i in more}:
+            raise RuntimeError(f"страницы не сработали: {len(items)} + {len(more)}, продолжение: {bool(cur)}")
+        return {"engine": cur["k"], "first": len(items), "second": len(more), "first_sec": first, "more_token": bool(cur2)}
+
+    step("lists_pages", fast_lists)
+
+    def shorts_list():
+        from . import lists
+        items, cur, _ = lists.first("shorts", None, route)
+        if len(items) < 8 or not all(i.get("short") for i in items):
+            raise RuntimeError(f"Shorts: {len(items)}")
+        return {"count": len(items), "more": bool(cur)}
+
+    step("shorts_list", shorts_list)
+
+    def socks_connect_modes():
+        """Собственный мини-SOCKS5 на 127.0.0.1: соединение по имени (ATYP 3), затем по IPv4 при отказе по имени."""
+        import socket
+        import threading
+        from . import bridge
+
+        echo = socket.socket()
+        echo.bind(("127.0.0.1", 0))
+        echo.listen(4)
+        seen = []
+
+        def serve_echo():
+            while True:
+                try:
+                    c, _ = echo.accept()
+                except OSError:
+                    return
+                c.sendall(b"hi")
+                c.close()
+
+        def serve_socks(srv):
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    return
+                try:
+                    c.recv(256)
+                    c.sendall(b"\x05\x00")
+                    head = c.recv(4)
+                    atyp = head[3]
+                    if atyp == 3:
+                        n = c.recv(1)[0]
+                        c.recv(n)
+                        c.recv(2)
+                        seen.append("domain")
+                        c.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)   # «отказ»: прокси не смог по имени
+                    else:
+                        c.recv(4)
+                        c.recv(2)
+                        seen.append("ipv4")
+                        c.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
+                        up = socket.create_connection(("127.0.0.1", echo.getsockname()[1]))
+                        c.sendall(up.recv(2))
+                        up.close()
+                except OSError:
+                    pass
+                finally:
+                    c.close()
+
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        threading.Thread(target=serve_echo, daemon=True).start()
+        threading.Thread(target=serve_socks, args=(srv,), daemon=True).start()
+        old = bridge._resolve_ipv4
+        bridge._resolve_ipv4 = lambda *a: (["127.0.0.1"], "тест")
+        try:
+            sock, info = bridge.connect_via_proxy(f"socks5://127.0.0.1:{srv.getsockname()[1]}", "rr1.example.test", 443, timeout=5)
+            data = sock.recv(2)
+            sock.close()
+        finally:
+            bridge._resolve_ipv4 = old
+            srv.close()
+            echo.close()
+        if data != b"hi" or info["atyp"] != "ipv4" or seen[:2] != ["domain", "domain"]:
+            raise RuntimeError(f"{data!r} {info} {seen}")
+        return {"attempts": seen, "final": info["atyp"]}
+
+    step("socks_domain_then_ipv4", socks_connect_modes)
+
+    def first_bytes():
+        """Как шаг «Проверка видео»: первые байты настоящего потока по Range-запросу, заголовки те же, что у плеера."""
+        from urllib.parse import urlsplit
+        from . import diagnostics
+        st = player.resolve_streams("yt", "dQw4w9WgXcQ", "360", route, "auto", embedded=True)
+        try:
+            return {"host": urlsplit(st["video"]).hostname, "result": diagnostics.probe_stream(st, route)}
+        except ValueError as first:
+            # как в плеере: основной формат дал 403 — берём H.264/MP4
+            st = player.resolve_streams("yt", "dQw4w9WgXcQ", "360", route, "h264", embedded=True)
+            return {"host": urlsplit(st["video"]).hostname, "result": diagnostics.probe_stream(st, route),
+                    "first_try": str(first)[:90], "retry": "h264"}
+
+    step("stream_first_bytes", first_bytes)
+
+    def stt_audio():
+        """Запись → WAV 16 кГц через ffmpeg сборки (то же делает микрофон в чате)."""
+        from . import voice
+        ff = find_tool("ffmpeg")
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "tone.wav"
+            flags = 0x08000000 if sys.platform.startswith("win") else 0
+            subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(src)],
+                           check=True, timeout=60, shell=False, creationflags=flags)
+            wav = voice.to_wav(ff, src.read_bytes(), Path(d) / "w")
+            return {"wav_bytes": wav.stat().st_size, "whisper_pinned": voice.WHISPER_ZIP["sha256"][:8]}
+
+    step("stt_audio", stt_audio)
     step("stream_720_h264", lambda: validate.is_stream_url(player.resolve_streams("yt", "dQw4w9WgXcQ", "720", route, "h264")["video"]))
     step("sponsorblock", lambda: len(sponsorblock.segments("dQw4w9WgXcQ", ["sponsor"], route)) >= 0)
 
@@ -135,6 +255,24 @@ def run(path: str) -> int:
         return getattr(webview, "__version__", "?")
 
     step("webview", webview_mod)
+
+    def cookie_api():
+        """Чтение cookies из WebView2 (окно входа): на Windows проверяем, что нужные типы .NET доступны. Окно не открываем."""
+        from . import login_window
+        d = login_window.cookie_dict(type("C", (), {"Name": "a", "Value": "b", "Domain": ".vk.com", "Path": "/", "IsSecure": True,
+                                                     "IsHttpOnly": True, "IsSession": False, "Expires": 1900000000})(), float)
+        if not d or not d["httponly"]:
+            raise RuntimeError("cookie_dict")
+        if not sys.platform.startswith("win"):
+            return "преобразование OK (WebView2 — только Windows)"
+        try:
+            from webview.platforms import edgechromium, winforms  # noqa: F401
+            from Microsoft.Web.WebView2.Core import CoreWebView2Cookie  # noqa: F401
+            return "преобразование OK, типы WebView2 доступны"
+        except Exception as exc:  # под Wine .NET нет — это не ошибка сборки
+            return f"преобразование OK; типы WebView2 недоступны здесь ({type(exc).__name__})"
+
+    step("webview2_cookies", cookie_api)
     step("ui_files", lambda: all((player.resource_dir() / "owntube" / "ui" / n).is_file() for n in ("index.html", "style.css", "app.js")))
     step("skip_script", lambda: player.SKIP_SCRIPT.is_file())
 

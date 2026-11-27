@@ -8,8 +8,19 @@ import threading
 
 
 class Socks5Server:
-    def __init__(self, user: str, secret: str, allow_remote: bool = True, hosts: dict | None = None):
+    def __init__(self, user: str, secret: str, allow_remote: bool = True, hosts: dict | None = None,
+                 domain_only: bool = False, reject_domains: dict | None = None, flaky: dict | None = None,
+                 max_conns: int = 0):
+        """domain_only: адреса (ATYP 1/4) отклоняются кодом 8. reject_domains {имя: REP}: прокси «не может» дойти до имени.
+        flaky {имя: n}: первые n попыток по имени — отказ 5. max_conns: сверх лимита одновременных — отказ 5."""
         self.user, self.secret, self.allow_remote = user, secret, allow_remote
+        self.domain_only = domain_only
+        self.reject_domains = reject_domains or {}
+        self.flaky = dict(flaky or {})
+        self.max_conns = max_conns
+        self.open_conns = 0
+        self.peak_conns = 0
+        self.atyps: list[int] = []
         self.hosts = hosts or {}  # имя -> (адрес, порт): подставные «внешние» серверы на 127.0.0.1
         self.targets: list[tuple[str, int]] = []
         self.auth_failures = 0
@@ -73,6 +84,20 @@ class Socks5Server:
                 host = socket.inet_ntop(socket.AF_INET6, self._exact(c, 16))
             port = struct.unpack(">H", self._exact(c, 2))[0]
             self.targets.append((host, port))
+            self.atyps.append(atyp)
+            if atyp != 3 and self.domain_only:
+                c.sendall(b"\x05\x08\x00\x01" + b"\x00" * 6)
+                return c.close()
+            if atyp == 3 and host in self.reject_domains:
+                c.sendall(b"\x05" + bytes([self.reject_domains[host]]) + b"\x00\x01" + b"\x00" * 6)
+                return c.close()
+            if atyp == 3 and self.flaky.get(host, 0) > 0:
+                self.flaky[host] -= 1
+                c.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
+                return c.close()
+            if self.max_conns and self.open_conns >= self.max_conns:
+                c.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
+                return c.close()
             if cmd != 1 or not self.allow_remote:
                 c.sendall(b"\x05\x02\x00\x01" + b"\x00" * 6)
                 return c.close()
@@ -82,6 +107,9 @@ class Socks5Server:
                 c.sendall(b"\x05\x04\x00\x01" + b"\x00" * 6)
                 return c.close()
             c.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
+            self.open_conns += 1
+            self.peak_conns = max(self.peak_conns, self.open_conns)
+            counted = True
             up.settimeout(None)
             c.settimeout(None)
             socks = [c, up]
@@ -97,6 +125,8 @@ class Socks5Server:
         except OSError:
             pass
         finally:
+            if locals().get("counted"):
+                self.open_conns -= 1
             for s in (c,):
                 try:
                     s.close()
