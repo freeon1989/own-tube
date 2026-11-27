@@ -31,6 +31,13 @@ if ! xvfb-run -a wine "$PY_WIN" -c "import sys" 2>/dev/null; then
   xvfb-run -a wine "$INSTALLER" /quiet InstallAllUsers=1 PrependPath=0 Include_test=0 Include_launcher=0 Include_pip=1 "TargetDir=C:\\Python312"
 fi
 xvfb-run -a wine "$PY_WIN" -m pip install -q --disable-pip-version-check -r requirements.txt "pyinstaller==6.11.1"
+# окно держится на pywebview → pythonnet → clr_loader: версии закреплены в requirements.txt и проверяются
+for pin in pywebview pythonnet clr_loader; do
+  want="$(grep -iE "^${pin}==" requirements.txt | head -1 | cut -d= -f3)"
+  have="$(xvfb-run -a wine "$PY_WIN" -c "import importlib.metadata as m; print(m.version('$pin'))" 2>/dev/null | tr -d '\r')"
+  [ "$want" = "$have" ] || { echo "$pin: в сборке $have, в requirements.txt $want" >&2; exit 1; }
+  echo "$pin $have"
+done
 
 echo "== внешние программы (проверка SHA-256) =="
 python3 scripts/fetch_tools.py "$CACHE" "$ROOT/build/tools"
@@ -49,6 +56,10 @@ cp -r dist/own-tube/. "$STAGE/$PKG/"
 mkdir -p "$STAGE/$PKG/tools"
 cp build/tools/mpv.exe build/tools/ffmpeg.exe build/tools/deno.exe build/tools/SOURCES.txt build/tools/ffmpeg-LICENSE.txt \
    build/tools/awgproxy.exe build/tools/SOURCES-awgproxy.txt "$STAGE/$PKG/tools/"
+# .NET Framework должен загружать сборки и с пометкой «из интернета» (см. owntube/motw.py)
+cp packaging/own-tube.exe.config "$STAGE/$PKG/own-tube.exe.config"
+grep -q 'loadFromRemoteSources enabled="true"' "$STAGE/$PKG/own-tube.exe.config"
+test -f "$STAGE/$PKG/_internal/pythonnet/runtime/Python.Runtime.dll" || { echo "нет Python.Runtime.dll в сборке" >&2; exit 1; }
 cp LICENSE "$STAGE/$PKG/LICENSE.txt"
 cp docs/START.txt "$STAGE/$PKG/START.txt"
 if find "$STAGE" \( -iname '*.db' -o -iname 'settings.json' -o -iname '*.key' -o \( -iname '*.pem' ! -path '*/certifi/*' \) -o -iname '.env*' \) | grep -q .; then

@@ -1,2 +1,4 @@
-pywebview>=5.0
+pywebview==6.2.1
+pythonnet==3.2.1
+clr_loader==0.3.1
 yt-dlp[default]

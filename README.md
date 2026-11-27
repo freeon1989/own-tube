@@ -10,16 +10,16 @@
 
 [~170 МБ, zip](https://github.com/freeon1989/own-tube/releases/latest/download/own-tube-win-x64.zip) · [страница релизов](https://github.com/freeon1989/own-tube/releases)
 
-Текущая версия: **0.3.0**. Нужны **Windows 10 или 11 (x64)** и [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (в Windows 11 и в большинстве установок Windows 10 он уже есть).
+Текущая версия: **0.3.1**. Нужны **Windows 10 или 11 (x64)** и [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (в Windows 11 и в большинстве установок Windows 10 он уже есть).
 
 Распакуйте архив и запустите `own-tube.exe`. Windows SmartScreen может показать предупреждение: сборка не подписана цифровым сертификатом. Нажмите «Подробнее» → «Выполнить в любом случае».
 
 Все данные остаются на этом компьютере, в папке `%APPDATA%\own-tube`. Телеметрии нет. Обновление — из релизов GitHub и только по кнопке «Обновить» (Настройки → О программе).
 
-SHA-256 (файлы `own-tube-win-x64.zip` и `own-tube-0.3.0-win-x64.zip` совпадают):
+SHA-256 (файлы `own-tube-win-x64.zip` и `own-tube-0.3.1-win-x64.zip` совпадают):
 
 ```
-737ad6cbf1e18c9ce66d7012bbfd822d15c30b256f76200964b15c6edbc9bee2
+b20e61ac22ad914592ca58aa503ee6adb0271c326befebee0542778c9d674e8e
 ```
 
 ## Скриншоты
@@ -76,7 +76,11 @@ Shorts, которые можно листать дальше:
 - Несколько тем оформления, в том числе «как у помощницы».
 - Загрузки через yt-dlp и ffmpeg, импорт Google Takeout. Всё хранится локально в SQLite.
 
-## Что нового в 0.3.0
+## Что нового в 0.3.1
+
+- Исправлен запуск на Windows после распаковки zip из браузера (ошибка pythonnet «Failed to resolve Python.Runtime.Loader.Initialize»): рядом с exe теперь `own-tube.exe.config`, при старте с файлов в папке программы снимается пометка «из интернета» (`owntube/motw.py`, только внутри папки), при сбое — понятное сообщение. Версии pywebview, pythonnet и clr_loader закреплены в `requirements.txt`. Если не помогло: `Get-ChildItem -Recurse "папка\own-tube" | Unblock-File` в PowerShell.
+
+## Что было в 0.3.0
 
 - **Встроенный VPN AmneziaWG** (Настройки → VPN). Туннель работает внутри программы через `tools\awgproxy.exe` (amneziawg-go + сетевой стек gVisor в пользовательском режиме): системный адаптер и права администратора не нужны, остальные программы идут как обычно. Программа говорит с ним по локальному SOCKS5 на 127.0.0.1 со случайным портом и одноразовым паролем. Поддерживаются Jc/Jmin/Jmax, S1–S4, H1–H4, I1–I5. Импорт ссылки `vpn://` (как в AmneziaVPN) или `.conf`; конфигурация хранится только зашифрованной (DPAPI). Статус: рукопожатие, трафик, задержка. «Проверить связь» работает и через VPN.
 - **Обновление из релизов GitHub** (Настройки → О программе): один запрос к `api.github.com` при запуске (можно выключить), описание изменений, «Обновить» скачивает `own-tube-win-x64.zip`, сверяет SHA-256 с файлом `.sha256` того же релиза, заменяет папку программы и перезапускает её. Прежняя версия остаётся рядом (`own-tube.old-<версия>`), данные в `%APPDATA%` не трогаются. «Пропустить эту версию».
@@ -161,6 +165,7 @@ owntube/
   sponsorblock.py
   network.py    маршрут трафика (Route, RouteProvider, ManualProxy): единственное место про прокси
   awg.py        встроенный VPN: разбор vpn:// и .conf, запуск awgproxy, AwgProvider, выбор маршрута
+  motw.py       снятие пометки «из интернета» с файлов программы, понятная ошибка pythonnet
   updater.py    обновление из релизов GitHub: проверка, скачивание с SHA-256, замена папки
   bridge.py     мост HTTP CONNECT → SOCKS5 для mpv
   ytdl.py       общие настройки yt-dlp и запросы через его сеть

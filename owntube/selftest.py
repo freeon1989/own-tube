@@ -308,6 +308,18 @@ def run(path: str) -> int:
             return "пропущено: Wine не поддерживает UDP-сокеты Go (WSAEOPNOTSUPP); на Windows проверяется этим же шагом"
         raise RuntimeError(err or f"код {out.returncode}")
 
+    def dotnet_config():
+        from . import motw
+        base = Path(sys.executable).resolve().parent
+        if not getattr(sys, "frozen", False):
+            return "пропущено: запуск из исходников"
+        if not motw.has_runtime_config(base):
+            raise RuntimeError("нет own-tube.exe.config с loadFromRemoteSources рядом с exe")
+        if not (base / "_internal" / "pythonnet" / "runtime" / "Python.Runtime.dll").is_file():
+            raise RuntimeError("нет pythonnet\\runtime\\Python.Runtime.dll")
+        return {"config": True, "motw": motw.strip(base)}
+
+    step("dotnet_config", dotnet_config)
     step("awgproxy", lambda: {"path": find_tool("awgproxy"), "version": _version(find_tool("awgproxy"), "-version")})
     step("awg_tunnel", awg_tunnel)
 

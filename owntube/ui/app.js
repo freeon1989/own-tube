@@ -1,5 +1,5 @@
 "use strict";
-/* own-tube 0.3.0. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
+/* own-tube 0.3.1. Текст из сети вставляется только через textContent и атрибуты; innerHTML не используется. */
 (function () {
   const NS = "http://www.w3.org/2000/svg";
   const $ = (id) => document.getElementById(id);

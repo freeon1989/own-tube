@@ -30,7 +30,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import urljoin, urlsplit
 
-from . import __version__, httpc
+from . import __version__, httpc, motw
 from .network import Route
 
 log = logging.getLogger("owntube.updater")
@@ -203,6 +203,7 @@ def extract(zip_path: Path, dest: Path) -> Path:
             if total > MAX_UNPACKED:
                 raise UpdateError("Архив распаковывается слишком большим — отказ")
         z.extractall(dest)
+    motw.strip(dest)  # на случай пометки «из интернета» (только внутри папки подготовки)
     for cand in [dest, *sorted(x for x in dest.iterdir() if x.is_dir())]:
         if (cand / EXE).is_file():
             return cand

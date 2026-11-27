@@ -7,7 +7,7 @@ import logging
 import sys
 import threading
 
-from . import __version__
+from . import __version__, motw
 from .api import Api
 from .settings import data_dir
 from .validate import RedactFilter
@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--login", choices=("google", "vk"), help=argparse.SUPPRESS)
     parser.add_argument("--apply-update", metavar="PLAN", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    # до любого импорта .NET: снять пометку «из интернета» с файлов программы (см. motw.py)
+    strip_result = motw.strip_app_dir()
     if args.apply_update:
         from .updater import apply_main
         return apply_main(args.apply_update)
@@ -50,8 +52,18 @@ def main(argv: list[str] | None = None) -> int:
         from .login_window import run as login_run
         return login_run(args.login)
 
-    import webview  # импорт здесь: тесты и скриншоты обходятся без окна
+    try:
+        import webview  # импорт здесь: тесты и скриншоты обходятся без окна
+        return _run_window(webview, args, strip_result)
+    except Exception as exc:
+        if not getattr(sys, "frozen", False):
+            raise
+        logging.getLogger("owntube.app").exception("Окно не запустилось")
+        motw.show_error(motw.friendly_message(exc, strip_result))
+        return 1
 
+
+def _run_window(webview, args, strip_result) -> int:
     if getattr(sys, "frozen", False):
         from .updater import cleanup_staging
         threading.Thread(target=cleanup_staging, daemon=True).start()
