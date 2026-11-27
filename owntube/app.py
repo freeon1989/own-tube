@@ -18,7 +18,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="own-tube")
     parser.add_argument("--debug", action="store_true", help="включить инструменты разработчика")
     parser.add_argument("--version", action="version", version=f"own-tube {__version__}")
+    parser.add_argument("--selftest", metavar="FILE", help="проверить поиск, потоки и программы без окна; отчёт в FILE")
     args = parser.parse_args(argv)
+    if args.selftest:
+        from .selftest import run
+        return run(args.selftest)
     log_dir = data_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     handlers = [logging.FileHandler(log_dir / "own-tube.log", encoding="utf-8")]

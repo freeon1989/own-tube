@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!own-tube.spec.in
 .pytest_cache/
 settings.json
 # Большие бинарники и модели: не в репозиторий

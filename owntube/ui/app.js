@@ -413,7 +413,7 @@
     const tools = st.tools;
     const themeOpts = h("div", { class: "themes", role: "radiogroup", "aria-label": "Тема" }, ...THEMES.map(([id, name, cols]) => h("button", {
       class: "theme-opt", type: "button", role: "radio", "aria-checked": String(S.theme === id),
-      onclick: async (e) => { if (await saveSettings({ theme: id })) { applyTheme(); e.currentTarget.parentElement.querySelectorAll(".theme-opt").forEach((x) => x.setAttribute("aria-checked", String(x === e.currentTarget))); } },
+      onclick: async (e) => { const opt = e.currentTarget; if (await saveSettings({ theme: id })) { applyTheme(); opt.parentElement.querySelectorAll(".theme-opt").forEach((x) => x.setAttribute("aria-checked", String(x === opt))); } },
     }, h("span", { class: "sw3" }, ...cols.map((c) => { const i = h("i"); i.style.background = c; return i; })), name)));
     const asstRows = ASSISTANTS.map((a) => h("div", { class: "row asst" + (a.id === S.assistant ? " active" : "") },
       h("img", { class: "av", src: `assets/heroines/${a.id}.webp`, alt: "" }),

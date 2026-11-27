@@ -1,0 +1,14 @@
+# -*- mode: python ; coding: utf-8 -*-
+# Сборка own-tube для Windows (onedir). Запускается из scripts/build_windows.sh.
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+datas = [("owntube/ui", "owntube/ui"), ("owntube/mpv", "owntube/mpv")]
+datas += collect_data_files("yt_dlp_ejs")
+hidden = collect_submodules("yt_dlp_ejs") + ["webview.platforms.edgechromium", "webview.platforms.winforms"]
+
+a = Analysis(["run_owntube.py"], pathex=["."], datas=datas, hiddenimports=hidden,
+             excludes=["tkinter", "unittest", "pytest", "playwright", "matplotlib", "numpy"], noarchive=False)
+pyz = PYZ(a.pure)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="own-tube", console=False, upx=False,
+          version=None, icon=None)
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="own-tube")
